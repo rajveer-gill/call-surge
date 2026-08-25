@@ -12,10 +12,20 @@ import { NextRequest, NextResponse } from 'next/server'
  *
  * 15s is well past a warm backend (sub-second) and well short of a cold start, so
  * a sleeping backend now fails fast and cheap instead of slowly and expensively.
+ *
+ * Writes get longer. One flat 15s reported a SUCCESSFUL partner-discount apply as a
+ * failure: that endpoint makes five Stripe round-trips plus several DB queries, and
+ * against a cold database the whole request outran the timeout while completing
+ * normally. Telling someone their billing change failed when it landed is worse
+ * than waiting — and reads, which are the ones that loop and pile up, keep the
+ * tight bound. A write is user-initiated and rare, so the cost exposure is small.
  */
-const PROXY_TIMEOUT_MS = Number(process.env.ADMIN_PROXY_TIMEOUT_MS) > 0
+const READ_TIMEOUT_MS = Number(process.env.ADMIN_PROXY_TIMEOUT_MS) > 0
   ? Number(process.env.ADMIN_PROXY_TIMEOUT_MS)
   : 15_000
+const WRITE_TIMEOUT_MS = Number(process.env.ADMIN_PROXY_WRITE_TIMEOUT_MS) > 0
+  ? Number(process.env.ADMIN_PROXY_WRITE_TIMEOUT_MS)
+  : 45_000
 
 export function adminBackendBaseUrl(): string | null {
   const raw = process.env.NEXT_PUBLIC_API_URL?.trim() ?? ''
@@ -49,8 +59,11 @@ export async function proxyAdminToBackend(
     ...(contentType ? { 'Content-Type': contentType } : {}),
   }
 
+  const isRead = request.method === 'GET' || request.method === 'HEAD'
+  const timeoutMs = isRead ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS
+
   let body: string | undefined
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
+  if (!isRead) {
     body = await request.text()
   }
 
@@ -61,7 +74,7 @@ export async function proxyAdminToBackend(
       headers,
       body: body && body.length > 0 ? body : undefined,
       cache: 'no-store',
-      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (e) {
     const timedOut = (e as Error)?.name === 'TimeoutError'
@@ -70,7 +83,9 @@ export async function proxyAdminToBackend(
     return NextResponse.json(
       {
         detail: timedOut
-          ? `The API did not respond within ${Math.round(PROXY_TIMEOUT_MS / 1000)}s. It may be starting up — retry in a moment.`
+          ? isRead
+            ? `The API did not respond within ${Math.round(timeoutMs / 1000)}s. It may be starting up — retry in a moment.`
+            : `The API did not answer within ${Math.round(timeoutMs / 1000)}s. The change may still have been applied — reload before retrying.`
           : 'Could not reach the API.',
       },
       { status: 504 }
