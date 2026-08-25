@@ -123,6 +123,8 @@ export function ProvisioningPanel() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Consecutive failures tolerated before giving up rather than polling forever.
+  const MAX_POLL_ATTEMPTS = 5
 
   const parsed = useMemo(() => parseRows(text), [text])
   const isRunning = job?.status === 'running' || job?.status === 'pending'
@@ -135,7 +137,7 @@ export function ProvisioningPanel() {
   }, [])
 
   const poll = useCallback(
-    async (jobId: string, delay = 1500) => {
+    async (jobId: string, delay = 1500, attempt = 0) => {
       try {
         const { data } = await api.get<ProvisioningJob>(
           `/api/admin/provisioning/jobs/${jobId}`,
@@ -149,8 +151,18 @@ export function ProvisioningPanel() {
           )
         }
       } catch {
-        // transient error — retry once on the same cadence
-        pollRef.current = setTimeout(() => void poll(jobId, delay), delay)
+        // "retry once" is what the old comment claimed; there was no counter, so this
+        // retried forever. A job endpoint that keeps failing (signed out, backend
+        // down) then polls for as long as the tab is open, and each attempt is a
+        // billed serverless invocation. Bound it and surface the give-up.
+        if (attempt >= MAX_POLL_ATTEMPTS) {
+          setError('Lost contact with the provisioning job. Reload to check its status.')
+          return
+        }
+        pollRef.current = setTimeout(
+          () => void poll(jobId, Math.min(delay * 2, 15000), attempt + 1),
+          delay,
+        )
       }
     },
     [api, adminApi],

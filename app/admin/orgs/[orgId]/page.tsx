@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { motion, useReducedMotion } from 'framer-motion'
@@ -22,6 +23,7 @@ import { useTenantAdmin } from '@/components/admin/useTenantAdmin'
 export default function AdminOrgPage() {
   const params = useParams<{ orgId: string }>()
   const orgId = String(params?.orgId || '')
+  const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
   const adminApi = useMemo(() => sameOriginApiConfig(), [])
   const reduceMotion = useReducedMotion()
@@ -69,9 +71,15 @@ export default function AdminOrgPage() {
   }, [api, adminApi])
 
   useEffect(() => {
+    // Gate on the session, as /admin does. Without this the page called both admin
+    // endpoints on every mount while signed out, and each rejected call still cost a
+    // full Netlify function invocation — 13s median, 42s worst — because the proxy
+    // waits on the backend before the 401 comes back. A signed-out tab left open
+    // billed all night for answers it was never entitled to.
+    if (!isLoaded || !isSignedIn) return
     void fetchOrgs()
     void fetchTenants()
-  }, [fetchOrgs, fetchTenants])
+  }, [isLoaded, isSignedIn, fetchOrgs, fetchTenants])
 
   const org = (orgs || []).find((o) => o.id === orgId) || null
   const stores = tenants.filter((t) => (t.org_id || '') === orgId)
@@ -90,7 +98,11 @@ export default function AdminOrgPage() {
 
           <div>
             <h1 className="font-display text-2xl font-semibold text-white">
-              {org?.name || (orgs === null ? 'Loading…' : 'Group not found')}
+              {!isLoaded
+                ? 'Loading…'
+                : !isSignedIn
+                  ? 'Sign in to view this group'
+                  : org?.name || (orgs === null ? 'Loading…' : 'Group not found')}
             </h1>
             <p className="mt-1 text-sm text-zinc-500">
               {/* "0 stores" is a claim. Only make it once the list has actually
