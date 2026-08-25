@@ -96,7 +96,11 @@ export function useTenantAdmin({
         return next
       })
       if (res.data.db_enabled === false) {
-        setError('Backend database is not connected (DATABASE_URL). Tenants cannot be listed.')
+        setError(
+          'The backend started without a working database connection, so tenants cannot be listed. ' +
+          'This is usually a restart while the database was still waking — restarting the backend ' +
+          'service fixes it. Check DATABASE_URL only if a restart does not.'
+        )
       } else if (list.length === 0) {
         setError(null)
       } else {

@@ -281,11 +281,35 @@ def init_db() -> bool:
     global _use_db
     url = os.getenv("DATABASE_URL")
     if not url:
+        _log.error("db_init_no_url — DATABASE_URL is not set; starting without a database")
         return False
     try:
         import psycopg2
         print("[DB] Connecting to PostgreSQL...")
-        conn = psycopg2.connect(url, connect_timeout=10)
+        # Retry the FIRST connect. USE_DB is decided once, at startup, and never
+        # revisited — so a single slow connect here disables the database for the
+        # life of the process even after it comes back. That is exactly what a cold
+        # free-tier Postgres does: staging booted while its database was waking,
+        # timed out at 10s, and then reported "no database" for hours with the
+        # database sitting there healthy. Worth waiting ~30s at boot to avoid.
+        conn = None
+        last_err = None
+        for attempt in range(4):
+            try:
+                conn = psycopg2.connect(url, connect_timeout=10)
+                if attempt:
+                    _log.warning("db_init_connected_after_retries attempts=%s", attempt + 1)
+                break
+            except Exception as e:
+                last_err = e
+                _log.warning(
+                    "db_init_connect_failed attempt=%s err=%s: %s",
+                    attempt + 1, type(e).__name__, e,
+                )
+                if attempt < 3:
+                    _time.sleep(2 * (attempt + 1))
+        if conn is None:
+            raise last_err if last_err else RuntimeError("could not connect")
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS appointments (
