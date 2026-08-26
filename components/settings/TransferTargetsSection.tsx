@@ -457,9 +457,14 @@ export function TransferTargetsSection({
                           {s.name || 'Unnamed'}
                         </option>
                       ))}
-                      {mode === 'edit' && draft.staff_id && !staffAvailableToLink.find((s) => s.id === draft.staff_id) && (
-                        <option value={draft.staff_id}>{draft.name || 'Current'}</option>
-                      )}
+                      {/* NOTE: this block used to read `mode === 'edit' && ...`, which
+                          could never be true — the enclosing condition already requires
+                          mode === 'add'. It was dead, and TypeScript flagged the
+                          impossible comparison. Removed rather than enabled: turning it
+                          on would show the roster picker during an edit, which is a
+                          product decision about whether a target's staff link can be
+                          changed after creation, not a type fix. If editing a
+                          roster-linked destination looks wrong, this is the place. */}
                     </select>
                     {!draft.phone.trim() && draft.staff_id && (
                       <p className="text-xs text-amber-700 mt-2">

@@ -116,7 +116,15 @@ function SettingsSection({
   titleId?: string
   storageKey?: string
   defaultOpen?: boolean
-} & Omit<React.ComponentPropsWithoutRef<'section'>, 'title'>) {
+} & Omit<
+  React.ComponentPropsWithoutRef<'section'>,
+  // framer-motion declares its own versions of these with different
+  // signatures, so spreading the native ones onto motion.section is a type
+  // conflict. A settings panel passes none of them.
+  'title' | 'onDrag' | 'onDragStart' | 'onDragEnd' | 'onDragEnter' | 'onDragLeave'
+  | 'onDragOver' | 'onDrop' | 'onAnimationStart' | 'onAnimationEnd'
+  | 'onAnimationIteration'
+>) {
   const reduceMotion = useReducedMotion()
   const { open, toggle } = useSectionOpen(storageKey, defaultOpen)
   const collapsible = Boolean(title)
@@ -315,8 +323,23 @@ export default function Settings() {
           const limits = (subRes?.data as { limits?: { transfer_max?: number; sms_automations_max?: number } } | null)?.limits
           if (limits?.transfer_max != null) setTransferMax(limits.transfer_max)
           if (limits?.sms_automations_max != null) setSmsAutomationsMax(limits.sms_automations_max)
-          setAutomations((automationsRes?.data as { automations?: unknown[] })?.automations || [])
-          setSetupStatus((setupRes?.data as { complete?: boolean; missing?: string[]; warnings?: string[] }) || null)
+          type AutomationRow = { id: number; trigger: string; template: string; enabled: boolean }
+          setAutomations(
+            (automationsRes?.data as { automations?: AutomationRow[] } | null)?.automations || []
+          )
+          const su = setupRes?.data as
+            | { complete?: boolean; missing?: string[]; warnings?: string[] }
+            | null
+            | undefined
+          setSetupStatus(
+            su
+              ? {
+                  complete: Boolean(su.complete),
+                  missing: su.missing ?? [],
+                  warnings: su.warnings ?? [],
+                }
+              : null
+          )
 
           const d = infoRes?.data as Record<string, unknown> | null | undefined
           if (!d) {

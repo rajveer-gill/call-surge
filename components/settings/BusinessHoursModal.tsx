@@ -125,7 +125,10 @@ export function BusinessHoursModal({ isOpen, onClose, hoursText, onApply }: Busi
       cancelAnimationFrame(raf1)
       cancelAnimationFrame(raf2)
       if (attachedEl && onWheel) {
-        attachedEl.removeEventListener('wheel', onWheel, { passive: false, capture: true })
+        // removeEventListener matches on capture only; `passive` is not part of
+        // its options and was silently ignored. Removal worked, the type was right
+        // to object.
+        attachedEl.removeEventListener('wheel', onWheel, { capture: true })
       }
     }
   }, [isOpen])
