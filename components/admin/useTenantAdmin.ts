@@ -10,10 +10,11 @@
  * than growing a second set of messages beside the first.
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Variants } from 'framer-motion'
 import { useRouter } from 'next/navigation'
 import { useApiClient, sameOriginApiConfig, setSelectedStoreId } from '@/lib/api'
+import { US_E164_PREFIX } from '@/components/admin/tenantFields'
 import type { Tenant, StripeStatus, TenantRowCtx } from '@/components/admin/tenantTypes'
 
 type InviteLinkResult = {
@@ -341,6 +342,20 @@ export function useTenantAdmin({
       setTwilioSaving(null)
     }
   }
+
+  // Seed each row's phone field from the tenant once it loads. This lived in
+  // app/admin/page.tsx, so the org page — which uses this hook — rendered its
+  // number inputs empty. Owning it here is the point of the hook: one behaviour,
+  // both routes.
+  useEffect(() => {
+    setTwilioDraft((prev) => {
+      const next = { ...prev }
+      for (const t of tenants) {
+        if (next[t.id] === undefined) next[t.id] = t.twilio_phone_number || US_E164_PREFIX
+      }
+      return next
+    })
+  }, [tenants])
 
   const rowCtx: TenantRowCtx = {
     accessDebugData, accessDebugLoading, accessDebugOpen, setAccessDebugOpen,

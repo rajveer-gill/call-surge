@@ -4,8 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAuth } from '@clerk/nextjs'
 import Link from 'next/link'
 import { motion, useReducedMotion } from 'framer-motion'
-import { useRouter } from 'next/navigation'
-import { useApiClient, sameOriginApiConfig, setSelectedStoreId } from '@/lib/api'
+import { useApiClient, sameOriginApiConfig } from '@/lib/api'
 import { formatTrialEndDate } from '@/lib/formatTrialEnd'
 import { AppChrome } from '@/components/layout/AppChrome'
 import { ProvisioningPanel } from '@/components/admin/ProvisioningPanel'
@@ -17,6 +16,7 @@ import { FleetHealthSummary } from '@/components/admin/FleetHealthSummary'
 import { CollapsibleSection } from '@/components/ui/CollapsibleSection'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { TenantRow, accessStatusLabel, accessStatusClass } from '@/components/admin/TenantRow'
+import { useTenantAdmin } from '@/components/admin/useTenantAdmin'
 import {
   US_E164_PREFIX,
   inputClass,
@@ -27,7 +27,7 @@ import {
   isUsTenantTwilioDraft,
   UsTwilioPhoneInput,
 } from '@/components/admin/tenantFields'
-import type { Tenant, StripeStatus, TenantRowCtx } from '@/components/admin/tenantTypes'
+import type { Tenant } from '@/components/admin/tenantTypes'
 
 /** Logs invite/relink debug JSON in browser console when set on Vercel. */
 const DEBUG_ADMIN = process.env.NEXT_PUBLIC_DEBUG_ADMIN === '1'
@@ -113,17 +113,12 @@ export default function AdminPage() {
   const { isLoaded, isSignedIn } = useAuth()
   const api = useApiClient()
   const adminApi = useMemo(() => sameOriginApiConfig(), [])
-  const router = useRouter()
   const reduceMotion = useReducedMotion()
   const [adminAllowed, setAdminAllowed] = useState<boolean | null>(null)
-  const [tenants, setTenants] = useState<Tenant[]>([])
   const [tenantQuery, setTenantQuery] = useState('')
-  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [success, setSuccess] = useState<string | null>(null)
-  const [deleting, setDeleting] = useState<string | null>(null)
-  const [pausing, setPausing] = useState<string | null>(null)
   const [form, setForm] = useState({
     client_id: '',
     name: '',
@@ -131,22 +126,10 @@ export default function AdminPage() {
     email: '',
     business_vertical: 'salon_chair',
   })
-  const [exempting, setExempting] = useState<string | null>(null)
-  const [exemptAction, setExemptAction] = useState<Record<string, string>>({})
   // Live Stripe state per tenant. Our own subscription_status is a webhook-maintained
   // copy, and it is wrong precisely when an admin is investigating a billing problem —
   // so the screen asks Stripe rather than showing our copy back.
-  const [stripeStatus, setStripeStatus] = useState<Record<string, StripeStatus>>({})
-  const [stripeChecking, setStripeChecking] = useState<string | null>(null)
-  const [exemptUntilDate, setExemptUntilDate] = useState<Record<string, string>>({})
   const [sessionError, setSessionError] = useState<string | null>(null)
-  const [twilioDraft, setTwilioDraft] = useState<Record<string, string>>({})
-  const [twilioSaving, setTwilioSaving] = useState<string | null>(null)
-  const [inviteEmailByTenant, setInviteEmailByTenant] = useState<Record<string, string>>({})
-  const [resendingInvite, setResendingInvite] = useState<string | null>(null)
-  const [accessDebugOpen, setAccessDebugOpen] = useState<Record<string, boolean>>({})
-  const [accessDebugData, setAccessDebugData] = useState<Record<string, unknown>>({})
-  const [accessDebugLoading, setAccessDebugLoading] = useState<string | null>(null)
   const [emailLookup, setEmailLookup] = useState('')
   const [emailLookupResult, setEmailLookupResult] = useState<unknown>(null)
   const [emailLookupLoading, setEmailLookupLoading] = useState(false)
@@ -174,6 +157,15 @@ export default function AdminPage() {
       transition: { duration: reduceMotion ? 0 : 0.35, ease: [0.22, 1, 0.36, 1] },
     },
   }
+
+  // One source of tenant state and handlers for both admin routes. Keeping a second
+  // copy here is how the two drifted: the "0 stores" wipe had to be fixed twice, in
+  // two files, because both had their own fetchTenants with the same bug.
+  const { tenants, setTenants, fetchTenants, rowCtx, loading } = useTenantAdmin({
+    onError: setError,
+    onSuccess: setSuccess,
+    listItem,
+  })
 
   const fetchOrgs = useCallback(async () => {
     try {
@@ -203,51 +195,6 @@ export default function AdminPage() {
       setCreatingOrg(false)
     }
   }
-
-  const fetchTenants = useCallback(async () => {
-    try {
-      const res = await api.get<{ tenants: Tenant[]; db_enabled?: boolean }>(
-        '/api/admin/tenants',
-        adminApi
-      )
-      const list = res.data.tenants || []
-      setTenants(list)
-      setInviteEmailByTenant((prev) => {
-        const next = { ...prev }
-        for (const t of list) {
-          next[t.id] = t.allocated_email || t.owner_email || t.pending_invite_email || ''
-        }
-        return next
-      })
-      if (res.data.db_enabled === false) {
-        setError('Backend database is not connected (DATABASE_URL). Tenants cannot be listed.')
-      } else if (list.length === 0) {
-        setError(null)
-      } else {
-        setError(null)
-      }
-    } catch (e: unknown) {
-      const err = e as {
-        response?: { status?: number; data?: { detail?: string } }
-        message?: string
-      }
-      // Same reasoning as useTenantAdmin.fetchTenants: keep the last good list.
-      if (err.response?.status === 403) {
-        setError('Admin access required. Add your Clerk user ID to ADMIN_CLERK_USER_IDS on the backend.')
-      } else if (err.response?.status === 401) {
-        setError('Please sign in.')
-      } else {
-        const detail = err.response?.data?.detail
-        setError(
-          detail ||
-            err.message ||
-            'Failed to load tenants. Check the browser Network tab for /api/admin/tenants.'
-        )
-      }
-    } finally {
-      setLoading(false)
-    }
-  }, [api, adminApi])
 
   const fetchOpsCheck = useCallback(async () => {
     setOpsCheckLoading(true)
@@ -288,16 +235,6 @@ export default function AdminPage() {
     void fetchOrgs()
     void fetchOpsCheck()
   }, [adminAllowed, fetchTenants, fetchOrgs, fetchOpsCheck])
-
-  useEffect(() => {
-    setTwilioDraft((prev) => {
-      const next = { ...prev }
-      for (const t of tenants) {
-        if (next[t.id] === undefined) next[t.id] = t.twilio_phone_number || US_E164_PREFIX
-      }
-      return next
-    })
-  }, [tenants])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -349,118 +286,6 @@ export default function AdminPage() {
     return ` WARNING: Stripe was NOT updated (${r.error || 'unknown error'}) — they will still be charged. Cancel or pause it in Stripe.`
   }
 
-  const checkStripe = async (tenantId: string) => {
-    setStripeChecking(tenantId)
-    try {
-      const { data } = await api.get<StripeStatus>(
-        `/api/admin/tenants/${tenantId}/stripe-status`,
-        adminApi
-      )
-      setStripeStatus((m) => ({ ...m, [tenantId]: data }))
-    } catch {
-      setStripeStatus((m) => ({
-        ...m,
-        [tenantId]: { has_subscription: false, message: 'Could not reach the server.' },
-      }))
-    } finally {
-      setStripeChecking(null)
-    }
-  }
-
-  const handleBillingExempt = async (tenantId: string) => {
-    const action = exemptAction[tenantId]
-    if (!action) return
-    setExempting(tenantId)
-    setError(null)
-    setSuccess(null)
-    try {
-      if (action === 'extend_trial_1') {
-        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_trial_months: 1 }, adminApi)
-        setSuccess('Trial extended by 1 month.' + stripeOutcome(r?.data?.stripe))
-      } else if (action === 'free_1') {
-        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 1 }, adminApi)
-        setSuccess('1 month billing exemption set.' + stripeOutcome(r?.data?.stripe))
-      } else if (action === 'free_3') {
-        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { extend_months: 3 }, adminApi)
-        setSuccess('3 months billing exemption set.' + stripeOutcome(r?.data?.stripe))
-      } else if (action === 'exempt_until') {
-        const date = exemptUntilDate[tenantId]
-        if (!date) {
-          setError('Pick a date for exempt until.')
-          setExempting(null)
-          return
-        }
-        const r = await api.patch(`/api/admin/tenants/${tenantId}/billing-exempt`, { exempt_until: date }, adminApi)
-        setSuccess(`Exempt until ${date} set.` + stripeOutcome(r?.data?.stripe))
-        setExemptUntilDate((d) => ({ ...d, [tenantId]: '' }))
-      }
-      setExemptAction((a) => ({ ...a, [tenantId]: '' }))
-      fetchTenants()
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
-      setError(err.response?.data?.detail || 'Failed to update billing')
-    } finally {
-      setExempting(null)
-    }
-  }
-
-  const handleDelete = async (tenant: Tenant) => {
-    if (!confirm(`Remove "${tenant.name}" (${tenant.client_id})? This cannot be undone.`)) return
-    setDeleting(tenant.id)
-    setError(null)
-    setSuccess(null)
-    try {
-      await api.delete(`/api/admin/tenants/${tenant.id}`, adminApi)
-      setSuccess(`Tenant "${tenant.name}" removed.`)
-      fetchTenants()
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
-      setError(err.response?.data?.detail || 'Failed to remove tenant')
-    } finally {
-      setDeleting(null)
-    }
-  }
-
-  const handleTogglePause = async (tenant: Tenant) => {
-    const next = !tenant.account_paused
-    if (
-      next &&
-      !confirm(
-        `Pause "${tenant.name}"? Their AI phone line and SMS will immediately stop answering until you resume.`,
-      )
-    )
-      return
-    setPausing(tenant.id)
-    setError(null)
-    setSuccess(null)
-    try {
-      await api.patch(`/api/admin/tenants/${tenant.id}/account-paused`, { paused: next }, adminApi)
-      setSuccess(next ? `"${tenant.name}" paused.` : `"${tenant.name}" resumed.`)
-      fetchTenants()
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
-      setError(err.response?.data?.detail || 'Failed to update pause state')
-    } finally {
-      setPausing(null)
-    }
-  }
-
-  const loadTenantAccessDebug = async (tenantId: string) => {
-    setAccessDebugLoading(tenantId)
-    setError(null)
-    try {
-      const { data } = await api.get(`/api/admin/tenants/${tenantId}/access-debug`, adminApi)
-      setAccessDebugData((d) => ({ ...d, [tenantId]: data }))
-      setAccessDebugOpen((o) => ({ ...o, [tenantId]: true }))
-      debugLogAdmin(`tenant ${tenantId}`, data)
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
-      setError(err.response?.data?.detail || 'Failed to load access debug')
-    } finally {
-      setAccessDebugLoading(null)
-    }
-  }
-
   const resolveEmailLookup = async () => {
     const email = emailLookup.trim()
     if (!email.includes('@')) {
@@ -485,164 +310,6 @@ export default function AdminPage() {
     }
   }
 
-  const handleResendInvite = async (tenantId: string) => {
-    const email = (inviteEmailByTenant[tenantId] || '').trim()
-    if (!email || !email.includes('@')) {
-      setError('Enter the client email address to resend or link the invite.')
-      return
-    }
-    setResendingInvite(tenantId)
-    setError(null)
-    setSuccess(null)
-    try {
-      const { data } = await api.post<
-        InviteLinkResult & { pending_invite_stored?: boolean; access_debug?: unknown }
-      >(`/api/admin/tenants/${tenantId}/resend-invite`, { email }, adminApi)
-      debugLogAdmin('resend-invite', data)
-      if (data.access_debug) {
-        setAccessDebugData((d) => ({ ...d, [tenantId]: data.access_debug }))
-        setAccessDebugOpen((o) => ({ ...o, [tenantId]: true }))
-      }
-      if (data.user_relinked) {
-        setSuccess(formatRelinkSuccessMessage(data))
-        await fetchTenants()
-        void loadTenantAccessDebug(tenantId)
-      } else if (data.invite_sent) {
-        setSuccess('Invitation email sent. Open that link from the inbox (same email you entered here).')
-        await fetchTenants()
-      } else {
-        setError(
-          data.clerk_error ||
-            'Invite was not sent. Check Render CLERK_SECRET_KEY and Clerk Dashboard → Invitations.'
-        )
-      }
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
-      setError(err.response?.data?.detail || 'Failed to resend invite')
-    } finally {
-      setResendingInvite(null)
-    }
-  }
-
-  const handleSaveTwilio = async (tenantId: string) => {
-    const phone = (twilioDraft[tenantId] || '').trim()
-    if (!/\d/.test(phone)) {
-      setError('Enter a phone number with digits.')
-      return
-    }
-    setTwilioSaving(tenantId)
-    setError(null)
-    setSuccess(null)
-    try {
-      const res = await api.patch<{
-        success?: boolean
-        webhook_config?: { voice_ok?: boolean; sms_ok?: boolean; errors?: string[] }
-      }>(
-        `/api/admin/tenants/${tenantId}/twilio-phone`,
-        { twilio_phone_number: phone },
-        adminApi
-      )
-      const wc = res.data.webhook_config
-      if (wc?.voice_ok && wc?.sms_ok) {
-        setSuccess('Twilio number saved and Voice + Messaging webhooks configured.')
-      } else if (wc?.errors?.length) {
-        setSuccess(`Number saved. Webhook config: ${wc.errors.join('; ')}`)
-      } else {
-        setSuccess('Twilio number saved. Inbound SMS/voice will match this number.')
-      }
-      await fetchTenants()
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } } }
-      setError(err.response?.data?.detail || 'Failed to save Twilio number')
-    } finally {
-      setTwilioSaving(null)
-    }
-  }
-
-  if (!isLoaded) {
-    return (
-      <AppChrome>
-        <div className="flex min-h-screen items-center justify-center">
-          <div className="h-10 w-10 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />
-        </div>
-      </AppChrome>
-    )
-  }
-
-  if (!isSignedIn) {
-    return (
-      <AppChrome>
-        <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-          <p className="max-w-md text-center text-zinc-400">You must be signed in to access the admin panel.</p>
-          <Link href="/" className="text-cyan-400 motion-safe-transition hover:text-cyan-300">
-            Back to home
-          </Link>
-        </div>
-      </AppChrome>
-    )
-  }
-
-  if (sessionError) {
-    return (
-      <AppChrome>
-        <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-          <p className="max-w-md text-center text-zinc-300">{sessionError}</p>
-          <button
-            type="button"
-            className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 motion-safe-transition hover:brightness-110"
-            onClick={() => void verifyAdminSession()}
-          >
-            Retry
-          </button>
-          <Link href="/" className="text-sm text-cyan-400 hover:text-cyan-300">
-            Back to home
-          </Link>
-        </div>
-      </AppChrome>
-    )
-  }
-
-  // Explicit "not an admin" state — the backend (source of truth) said is_admin:false.
-  // We render this instead of redirecting so we never ping-pong with the server layout.
-  if (adminAllowed === false) {
-    return (
-      <AppChrome>
-        <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8">
-          <p className="max-w-md text-center text-zinc-300">
-            You&apos;re signed in, but this account isn&apos;t a platform admin. If this is wrong, the admin
-            allowlist (<code className="text-zinc-400">ADMIN_CLERK_USER_IDS</code>) on the backend doesn&apos;t
-            include your user ID for this environment.
-          </p>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              className="rounded-full bg-gradient-to-r from-cyan-600 to-indigo-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-500/20 motion-safe-transition hover:brightness-110"
-              onClick={() => void verifyAdminSession()}
-            >
-              Retry
-            </button>
-            <Link href="/" className="text-sm text-cyan-400 hover:text-cyan-300">
-              Back to home
-            </Link>
-          </div>
-        </div>
-      </AppChrome>
-    )
-  }
-
-  if (adminAllowed !== true) {
-    return (
-      <AppChrome>
-        <div className="flex min-h-screen items-center justify-center">
-          <div className="h-10 w-10 animate-spin rounded-full border-2 border-cyan-400/30 border-t-cyan-400" />
-        </div>
-      </AppChrome>
-    )
-  }
-
-  /** Stores grouped by their group, groups first, independents last. A franchise's
-   *  34 locations scattered through one flat list is unreadable; together they are a
-   *  customer. */
   const groupTenants = (list: Tenant[]) => {
     const groups = new Map<string, { key: string; name: string; rows: Tenant[] }>()
     const loose: Tenant[] = []
@@ -664,20 +331,6 @@ export default function AdminPage() {
   /** The row is a view onto this page's state, so it takes one object rather than
    *  two dozen props. Rebuilt whenever any of it changes — cheaper than the alternative
    *  of threading each value through by hand and forgetting one. */
-  const rowCtx: TenantRowCtx = {
-    accessDebugData, accessDebugLoading, accessDebugOpen, setAccessDebugOpen,
-    loadTenantAccessDebug, checkStripe, stripeChecking, stripeStatus,
-    deleting, handleDelete, exemptAction, setExemptAction, exemptUntilDate,
-    setExemptUntilDate, exempting, handleBillingExempt, handleResendInvite,
-    resendingInvite, inviteEmailByTenant, setInviteEmailByTenant, handleSaveTwilio,
-    twilioDraft, setTwilioDraft, twilioSaving, handleTogglePause, pausing,
-    listItem,
-    openDashboard: (clientId: string) => {
-      setSelectedStoreId(clientId)
-      router.push('/dashboard')
-    },
-  }
-
   const tenantQ = tenantQuery.trim().toLowerCase()
   const filteredTenants = tenantQ
     ? tenants.filter((t) =>
