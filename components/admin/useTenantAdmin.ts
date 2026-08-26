@@ -10,7 +10,7 @@
  * than growing a second set of messages beside the first.
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { Variants } from 'framer-motion'
 import { useRouter } from 'next/navigation'
 import { useApiClient, sameOriginApiConfig, setSelectedStoreId } from '@/lib/api'
@@ -58,7 +58,12 @@ export function useTenantAdmin({
   listItem: Variants
 }) {
   const api = useApiClient()
-  const adminApi = sameOriginApiConfig()
+  // MUST be memoized. Unmemoized, this returns a new object every render, which
+  // gives every useCallback depending on it a new identity, which re-fires every
+  // effect depending on THOSE — fetch, setState, re-render, fetch. That loop ran at
+  // ~5-11 requests/second against a per-invocation-billed host and cost real money
+  // twice. lib/api.ts keeps useApiClient stable for exactly this reason and says so.
+  const adminApi = useMemo(() => sameOriginApiConfig(), [])
   const router = useRouter()
   const setError = onError
   const setSuccess = onSuccess
