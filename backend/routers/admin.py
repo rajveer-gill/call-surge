@@ -718,6 +718,14 @@ def admin_add_org_member(
         raise HTTPException(status_code=503, detail="Database required")
     if not database.db_org_get_by_id(org_id):
         raise HTTPException(status_code=404, detail="Org not found")
+    # A group has exactly one owner, and this path writes the role directly. Without
+    # this guard the invariant the customer-facing rules depend on can be broken from
+    # the admin side, which is the one place it would go unnoticed.
+    if (req.role or "").strip().lower() == "owner":
+        raise HTTPException(
+            status_code=400,
+            detail="Add them as a manager, then use POST /api/admin/orgs/{org_id}/owner to hand over ownership.",
+        )
     uid = (req.clerk_user_id or "").strip()
     if uid:
         if not database.db_org_member_add(uid, org_id, req.role):
@@ -1592,3 +1600,55 @@ def me_access(request: Request):
         "pending_invite_for_primary_email": pending_invite_tid,
         "diagnosis": diagnosis,
     }
+
+
+class AdminOrgOwnerSet(BaseModel):
+    clerk_user_id: str
+
+
+@router.post("/api/admin/orgs/{org_id}/owner")
+def admin_set_org_owner(
+    org_id: str, req: AdminOrgOwnerSet, request: Request, admin: str = Depends(deps.require_admin)
+):
+    """Make someone the group's owner, demoting whoever holds it now.
+
+    This is the recovery path when a group cannot fix itself: the owner has left the
+    company, lost the account, or never existed because the group predates owners.
+    Customers cannot do this to each other — an owner hands over voluntarily via
+    /api/org/members/{id}/transfer-ownership, and a manager cannot promote anyone.
+    Overriding that has to be a deliberate, audited act by us.
+
+    Demotion of the incumbent is the point, not a side effect: leaving two owners
+    would break the single-owner rule that every other guard here relies on.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    if not database.db_org_get_by_id(org_id):
+        raise HTTPException(status_code=404, detail="Org not found")
+    uid = (req.clerk_user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="clerk_user_id is required")
+    if database.db_org_member_role(uid, org_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="They do not oversee this group yet. Add them as a manager first.",
+        )
+    members = database.db_org_members(org_id)
+    current = next((m["clerk_user_id"] for m in members if (m.get("role") or "") == "owner"), None)
+    if current == uid:
+        return {"ok": True, "org_id": org_id, "owner": uid, "changed": False}
+    if current:
+        if not database.db_org_transfer_ownership(org_id, current, uid):
+            raise HTTPException(status_code=500, detail="Could not transfer ownership")
+    else:
+        # No owner at all — a group created before owners existed, or one whose
+        # backfill found no whole-group manager to promote.
+        if not database.db_org_member_add(uid, org_id, "owner"):
+            raise HTTPException(status_code=500, detail="Could not set the owner")
+    deps.audit_log(
+        "admin", "org_owner_reassigned", actor_id=admin, resource_type="org",
+        resource_id=org_id,
+        details={"new_owner": uid, "previous_owner": current, "had_owner": bool(current)},
+        request=request,
+    )
+    return {"ok": True, "org_id": org_id, "owner": uid, "previous_owner": current, "changed": True}

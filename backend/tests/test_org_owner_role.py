@@ -157,3 +157,76 @@ def test_a_store_scoped_manager_is_not_a_group_member(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         org._actor_role("u1", "org_1", "manager", _Req())
     assert ei.value.status_code == 403
+
+
+# --- exactly one owner, and how it moves -----------------------------------
+
+def test_role_endpoint_refuses_to_mint_a_second_owner(monkeypatch):
+    """Promoting to owner would leave two, and "the owner" stops meaning anything."""
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "owner")
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as ei:
+        org.update_org_member_role(
+            "u_target", org.OrgMemberRoleUpdate(role="owner"), _Req(), user_id="u_owner"
+        )
+    assert ei.value.status_code == 400
+    assert "transfer" in str(ei.value.detail).lower()
+
+
+def test_cannot_invite_straight_to_owner(monkeypatch):
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "owner")
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as ei:
+        org.invite_org_member(
+            org.OrgMemberInvite(email="new@example.com", role="owner"), _Req(), user_id="u_owner"
+        )
+    assert ei.value.status_code == 400
+
+
+def test_transfer_requires_the_target_to_already_be_in_the_group(monkeypatch):
+    """Handing the business to an address that has not accepted an invite would be a
+    way to lose it."""
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role",
+                        lambda u, _o: "owner" if u == "u_owner" else None)
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as ei:
+        org.transfer_org_ownership(
+            "u_stranger", org.OrgOwnershipTransfer(), _Req(), user_id="u_owner"
+        )
+    assert ei.value.status_code == 404
+
+
+def test_only_an_owner_may_transfer(monkeypatch):
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "manager")
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as ei:
+        org.transfer_org_ownership(
+            "u_target", org.OrgOwnershipTransfer(), _Req(), user_id="u_manager"
+        )
+    assert ei.value.status_code == 403
+
+
+def test_transfer_demotes_the_previous_owner(monkeypatch):
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role",
+                        lambda u, _o: "owner" if u == "u_owner" else "manager")
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    seen = {}
+    monkeypatch.setattr(database, "db_org_transfer_ownership",
+                        lambda o, f, t: seen.update(org_id=o, frm=f, to=t) or True)
+    out = org.transfer_org_ownership(
+        "u_target", org.OrgOwnershipTransfer(), _Req(), user_id="u_owner"
+    )
+    assert seen == {"org_id": "o1", "frm": "u_owner", "to": "u_target"}
+    assert out["owner"] == "u_target"
+    # Stated plainly, because the caller is giving away their own access.
+    assert out["you_are_now"] == "manager"

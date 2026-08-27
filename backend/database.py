@@ -1671,6 +1671,61 @@ def db_org_owner_count(org_id: str) -> int:
         raise DatabaseUnavailable(f"could not count org owners: {type(e).__name__}") from e
 
 
+def db_org_transfer_ownership(org_id: str, from_user: str, to_user: str) -> bool:
+    """Hand the head account to someone else. One statement, one transaction.
+
+    Transfer rather than grant: a group has exactly one owner, so making a second
+    person owner has to demote the first in the same breath. Done as two updates in
+    one transaction because the in-between state — two owners, or none — is the
+    state every rule here exists to prevent, and a crash must not be able to leave
+    the group sitting in it.
+
+    The target must already oversee the whole group. Handing the business to an
+    address that has not accepted an invite would be a way to lose it.
+    """
+    src = (from_user or "").strip()
+    dst = (to_user or "").strip()
+    if not org_id or not src or not dst or src == dst:
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT clerk_user_id, role FROM org_members "
+            "WHERE org_id = %s::uuid AND tenant_id IS NULL "
+            "AND clerk_user_id IN (%s, %s) FOR UPDATE",
+            (org_id, src, dst),
+        )
+        found = {r[0]: r[1] for r in cur.fetchall()}
+        if found.get(src) != "owner" or dst not in found:
+            conn.rollback()
+            cur.close()
+            return False
+        cur.execute(
+            "UPDATE org_members SET role = 'manager' "
+            "WHERE org_id = %s::uuid AND clerk_user_id = %s AND tenant_id IS NULL",
+            (org_id, src),
+        )
+        cur.execute(
+            "UPDATE org_members SET role = 'owner' "
+            "WHERE org_id = %s::uuid AND clerk_user_id = %s AND tenant_id IS NULL",
+            (org_id, dst),
+        )
+        conn.commit()
+        cur.close()
+        _log.info("org_ownership_transferred org=%s from=%s to=%s", org_id, src, dst)
+        return True
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _log.error("org_transfer_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        return False
+
+
 def db_org_member_remove(clerk_user_id: str, org_id: str) -> bool:
     conn = _get_conn()
     if not conn:

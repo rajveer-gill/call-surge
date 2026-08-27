@@ -568,6 +568,13 @@ def invite_org_member(
     role = (req.role or "manager").strip().lower()
     if role not in database.ORG_ROLES:
         raise HTTPException(status_code=400, detail="Unknown role.")
+    if role == "owner":
+        # Inviting straight to owner would hand the business to an address that has
+        # not accepted anything yet — and would leave two owners if it were honoured.
+        raise HTTPException(
+            status_code=400,
+            detail="Invite them as a manager, then transfer ownership once they have signed in.",
+        )
     _guard_target(actor, None, oid, granting=role)
     link = clerk_service._clerk_invite_email_to_org(str(req.email), oid, role)
     deps.audit_log(
@@ -609,6 +616,14 @@ def update_org_member_role(
     target_role = database.db_org_member_role(clerk_user_id, oid)
     if target_role is None:
         raise HTTPException(status_code=404, detail="That person does not oversee this group.")
+    if role == "owner":
+        # A group has exactly one owner. Promoting a second would leave two, and
+        # "the owner" stops meaning anything. Ownership moves by transfer, which
+        # demotes the incumbent in the same transaction.
+        raise HTTPException(
+            status_code=400,
+            detail="A group has one owner. Use transfer-ownership to hand it over.",
+        )
     _guard_target(actor, target_role, oid, granting=role)
     if not database.db_org_member_add(clerk_user_id, oid, role):
         raise HTTPException(status_code=500, detail="Could not change that role.")
@@ -647,3 +662,42 @@ def remove_org_member(
         request=request,
     )
     return {"ok": ok, "clerk_user_id": clerk_user_id, "org_id": oid}
+
+
+class OrgOwnershipTransfer(BaseModel):
+    org_id: Optional[str] = None
+
+
+@router.post("/api/org/members/{clerk_user_id}/transfer-ownership")
+def transfer_org_ownership(
+    clerk_user_id: str,
+    req: OrgOwnershipTransfer,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+):
+    """Hand the head account to another group member.
+
+    The caller stops being owner in the same transaction the target becomes one, so
+    the group is never briefly ownerless and never briefly has two.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    oid = _resolve_org_for_user(user_id, req.org_id)
+    _actor_role(user_id, oid, "owner", request)
+    if (clerk_user_id or "").strip() == user_id:
+        raise HTTPException(status_code=400, detail="You are already the owner.")
+    target_role = database.db_org_member_role(clerk_user_id, oid)
+    if target_role is None:
+        raise HTTPException(
+            status_code=404,
+            detail="They need to be in the group first. Invite them, then transfer once they have signed in.",
+        )
+    if not database.db_org_transfer_ownership(oid, user_id, clerk_user_id):
+        raise HTTPException(status_code=500, detail="Could not transfer ownership.")
+    deps.audit_log(
+        "user", "org_ownership_transferred", actor_id=user_id, resource_type="org",
+        resource_id=oid,
+        details={"to": clerk_user_id, "their_previous_role": target_role},
+        request=request,
+    )
+    return {"ok": True, "org_id": oid, "owner": clerk_user_id, "you_are_now": "manager"}
