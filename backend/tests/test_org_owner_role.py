@@ -230,3 +230,63 @@ def test_transfer_demotes_the_previous_owner(monkeypatch):
     assert out["owner"] == "u_target"
     # Stated plainly, because the caller is giving away their own access.
     assert out["you_are_now"] == "manager"
+
+
+# --- the invitation has to be redeemable ------------------------------------
+
+def test_invite_redirects_to_sign_up_not_a_protected_page(monkeypatch):
+    """A Clerk ticket can only be redeemed by the sign-up flow.
+
+    This pointed at /dashboard/stores, so an invitee with no account was bounced to
+    sign-in and told "new sign ups are currently restricted". The invite was real,
+    the email arrived, and it could not be used.
+    """
+    import clerk_service
+
+    sent = {}
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_dummy")
+    monkeypatch.setenv("FRONTEND_URL", "https://staging.example")
+    monkeypatch.setattr(clerk_service, "_clerk_user_ids_for_email", lambda *a, **k: [])
+    monkeypatch.setattr(clerk_service.database, "db_org_invite_upsert", lambda *a, **k: True)
+    monkeypatch.setattr(clerk_service.deps, "_admin_access_log", lambda *a, **k: None)
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+    import httpx
+
+    def _post(url, **kw):
+        sent.update(kw.get("json") or {})
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _post)
+    clerk_service._clerk_invite_email_to_org("new@example.net", "org_1", "manager")
+    url = sent.get("redirect_url", "")
+    assert "/sign-up" in url, url
+    assert "/dashboard/stores?" not in url and not url.endswith("/dashboard/stores"), url
+    assert "invited=1" in url, url
+
+
+def test_store_scoped_invite_carries_the_store_destination(monkeypatch):
+    import clerk_service
+
+    sent = {}
+    monkeypatch.setenv("CLERK_SECRET_KEY", "sk_test_dummy")
+    monkeypatch.setenv("FRONTEND_URL", "https://staging.example")
+    monkeypatch.setattr(clerk_service, "_clerk_user_ids_for_email", lambda *a, **k: [])
+    monkeypatch.setattr(clerk_service.database, "db_org_invite_upsert", lambda *a, **k: True)
+    monkeypatch.setattr(clerk_service.deps, "_admin_access_log", lambda *a, **k: None)
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: (sent.update(kw.get("json") or {}), _Resp())[1])
+    clerk_service._clerk_invite_email_to_org("s@example.net", "org_1", "manager", tenant_id="t1")
+    url = sent.get("redirect_url", "")
+    assert "/sign-up" in url
+    # A store manager has no rollup to land on.
+    assert "%2Fdashboard" in url and "stores" not in url

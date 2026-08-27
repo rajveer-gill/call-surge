@@ -317,9 +317,17 @@ def _clerk_invite_email_to_org(
                 # Carried for reference only — membership is materialized by matching
                 # the verified email at login, not by trusting this metadata.
                 "public_metadata": {"org_id": org_id, "org_role": role},
-                # A store manager has no rollup to land on; send them to the dashboard.
+                # Must land on the SIGN-UP page. Clerk appends __clerk_ticket to this
+                # URL, and the ticket can only be redeemed by the sign-up flow. This
+                # pointed straight at a protected dashboard route, so an invitee with
+                # no account was bounced to sign-in and told "new sign ups are
+                # currently restricted" — the invite was real and unusable.
+                #
+                # `next` carries where they belong afterwards: a store manager has no
+                # rollup to land on, a group member does.
                 "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com")
-                + ("/dashboard" if tenant_id else "/dashboard/stores"),
+                + "/sign-up?invited=1&next="
+                + ("%2Fdashboard" if tenant_id else "%2Fdashboard%2Fstores"),
             },
             timeout=10.0,
         )
