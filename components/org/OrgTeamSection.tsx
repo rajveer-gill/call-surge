@@ -375,8 +375,8 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
           <p className="mb-3 text-sm text-amber-100/80">
             <strong>{data.members.find((m) => m.clerk_user_id === transferTo)?.email || transferTo}</strong>{' '}
             becomes the owner and{' '}
-            <strong>you become a manager</strong>. You will not be able to undo this
-            yourself — only the new owner can hand it back.
+            <strong>you become a Group admin</strong>. You will not be able to undo
+            this yourself — only the new owner can hand it back.
             {owner ? '' : ' This group currently has no owner.'}
           </p>
           <label className="mb-3 block">
@@ -404,7 +404,7 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
                     setTransferTo(null)
                     setTransferConfirm('')
                   },
-                  'Ownership transferred. You are now a manager.'
+                  'Ownership transferred. You are now a Group admin.'
                 )
               }
               className="rounded-lg bg-amber-500/20 px-3 py-2 text-sm font-medium text-amber-100 hover:bg-amber-500/30 disabled:opacity-40"

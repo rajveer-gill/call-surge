@@ -228,8 +228,10 @@ def test_transfer_demotes_the_previous_owner(monkeypatch):
     )
     assert seen == {"org_id": "o1", "frm": "u_owner", "to": "u_target"}
     assert out["owner"] == "u_target"
-    # Stated plainly, because the caller is giving away their own access.
+    # Stated plainly, because the caller is giving away their own access — and in
+    # the words they see on screen, not the value the database stores.
     assert out["you_are_now"] == "manager"
+    assert out["you_are_now_label"] == "Group admin"
 
 
 # --- the invitation has to be redeemable ------------------------------------

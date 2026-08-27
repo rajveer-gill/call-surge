@@ -736,7 +736,15 @@ def transfer_org_ownership(
         details={"to": clerk_user_id, "their_previous_role": target_role},
         request=request,
     )
-    return {"ok": True, "org_id": oid, "owner": clerk_user_id, "you_are_now": "manager"}
+    # "manager" is the stored value; "Group admin" is what the person reading this
+    # sees everywhere else. Returning the internal name invited the UI to print it.
+    return {
+        "ok": True,
+        "org_id": oid,
+        "owner": clerk_user_id,
+        "you_are_now": "manager",
+        "you_are_now_label": "Group admin",
+    }
 
 
 @router.delete("/api/org/invites")
