@@ -873,6 +873,30 @@ _SPOKEN_AFTER_BOOKING = {
 }
 
 
+_SENT_CONFIRMATIONS: dict = {}
+_SENT_CONFIRMATIONS_MAX = 500
+
+
+def _confirmation_already_sent(call_sid: str, to_number: str, body: str) -> bool:
+    """Has this exact confirmation already gone to this number on this call?
+
+    In-process and bounded rather than a database table: it only has to survive the
+    seconds between two bookings in one live call, and a duplicate text after a
+    restart is a far smaller problem than a table to maintain. Without a call_sid we
+    cannot tell repeats apart, so nothing is suppressed.
+    """
+    sid = (call_sid or "").strip()
+    if not sid:
+        return False
+    key = (sid, (to_number or "").strip(), (body or "").strip())
+    if key in _SENT_CONFIRMATIONS:
+        return True
+    if len(_SENT_CONFIRMATIONS) >= _SENT_CONFIRMATIONS_MAX:
+        _SENT_CONFIRMATIONS.clear()
+    _SENT_CONFIRMATIONS[key] = True
+    return False
+
+
 def post_booking_spoken_confirmation(status: str, outcome: str) -> str:
     """Spoken confirmation after a booking lands.
 
@@ -1364,6 +1388,24 @@ def _send_booking_confirmation_sms(
     # caller to lock and nothing for them to confirm — the salon confirms to them.
     # Read off the row we just wrote; pending_review is set only by the external branch.
     is_request = (apt.get("status") or "").strip() == "pending_review"
+    # One call, one confirmation. A caller who amends anything mid-call — the time,
+    # the stylist, the service — supersedes the earlier draft and creates a new
+    # appointment, and this used to text on every creation. A 140-second call
+    # produced appointments 193, 194 and 195 and three IDENTICAL texts, 336 bytes
+    # each, seconds apart. Nothing new was being said; the caller was told the same
+    # thing three times and had no way to know it was one booking.
+    #
+    # Keyed on the exact body, so a genuine correction — a different time, a
+    # different stylist — still goes out. Only the repeat is dropped.
+    call_sid_for_dedupe = (call_data.get("call_sid") or "").strip()
+    if to_number_sms and _confirmation_already_sent(call_sid_for_dedupe, to_number_sms, thanks_msg):
+        sms_info(
+            "post_booking_confirmation_suppressed_duplicate",
+            client_id=cid,
+            to_number=to_number_sms,
+            call_sid=call_sid_for_dedupe,
+        )
+        to_number_sms = None
     if to_number_sms:
         if runtime.USE_DB and cid and cid != "default":
             database.db_sms_consent_record(
