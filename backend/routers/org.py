@@ -439,6 +439,26 @@ def invite_store_manager(
         # Every store reached through this endpoint belongs to an org by construction;
         # without one there is nothing to scope the membership to.
         raise HTTPException(status_code=409, detail="That store is not part of a group.")
+    # org_members is PRIMARY KEY (clerk_user_id, org_id): one row per person per
+    # group. Inviting someone who already manages a DIFFERENT store in this group
+    # would upsert that row and move them — they would lose the other store, with no
+    # error and nothing on screen to say so. Refuse instead, and name the store they
+    # are already on so the person inviting can decide.
+    existing_uid = clerk_service.clerk_user_id_for_email(str(req.email))
+    if existing_uid:
+        prior = database.db_org_member_scope(existing_uid, org_of_store)
+        prior_tenant = (prior or {}).get("tenant_id")
+        if prior and prior_tenant and str(prior_tenant) != str(tenant["id"]):
+            other = database.db_tenant_get_by_id(str(prior_tenant)) or {}
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "That person already manages "
+                    + (other.get("name") or "another store")
+                    + " in this group, and an account can manage only one store. "
+                    "Remove them from that store first, or give them group access instead."
+                ),
+            )
     link = clerk_service._clerk_invite_email_to_org(
         str(req.email), org_of_store, role="manager", tenant_id=str(tenant["id"])
     )
@@ -792,3 +812,91 @@ def revoke_org_invite(
         "link_revoked": bool(revoked.get("revoked")) and not revoked.get("error"),
         "clerk_error": revoked.get("error"),
     }
+
+
+@router.get("/api/org/stores/{store_ref}/managers")
+def list_store_managers(
+    store_ref: str,
+    user_id: str = Depends(deps.require_user),
+):
+    """Who runs this one store.
+
+    Inviting a store manager shipped with no way to see who had been invited or to
+    take them off again. A standing invitation to a store is access to that store's
+    calls, messages and customers, and it could only be withdrawn by asking us.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    scoped = database.db_org_store_for_user(user_id, store_ref)
+    if not scoped:
+        raise HTTPException(status_code=403, detail="You do not have access to that store.")
+    tenant = scoped["tenant"]
+    org_of_store = str(tenant.get("org_id") or "")
+    if not org_of_store:
+        return {"managers": [], "pending_invites": [], "can_manage": False}
+    managers = database.db_store_managers(org_of_store, str(tenant["id"]))
+    for m in managers:
+        m["email"] = None
+        m["is_you"] = m.get("clerk_user_id") == user_id
+        try:
+            link = deps._clerk_fetch_user_link(m.get("clerk_user_id") or "")
+            emails = (link or {}).get("emails") or []
+            if emails:
+                m["email"] = str(emails[0]).strip()
+        except Exception as e:
+            logger.warning(
+                "store_manager_email_lookup_failed store=%s err=%s: %s",
+                tenant.get("client_id"), type(e).__name__, e,
+            )
+    pending = [
+        inv
+        for inv in database.db_org_invites_for_org(org_of_store)
+        if str(inv.get("tenant_id") or "") == str(tenant["id"])
+    ]
+    return {
+        "managers": managers,
+        "pending_invites": pending,
+        "can_manage": database.org_role_at_least(scoped.get("role"), "manager"),
+    }
+
+
+@router.delete("/api/org/stores/{store_ref}/managers/{clerk_user_id}")
+def remove_store_manager(
+    store_ref: str,
+    clerk_user_id: str,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+):
+    """Take someone off this store."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    scoped = database.db_org_store_for_user(user_id, store_ref)
+    if not scoped:
+        raise HTTPException(status_code=403, detail="You do not have access to that store.")
+    if not database.org_role_at_least(scoped.get("role"), "manager"):
+        raise HTTPException(
+            status_code=403, detail="Your account can view this store but not change it."
+        )
+    tenant = scoped["tenant"]
+    org_of_store = str(tenant.get("org_id") or "")
+    existing = database.db_org_member_scope(clerk_user_id, org_of_store)
+    if not existing or str(existing.get("tenant_id") or "") != str(tenant["id"]):
+        raise HTTPException(status_code=404, detail="They are not a manager of this store.")
+    # Refuse to strip a whole-group person from here. Their row covers every store,
+    # so deleting it from one store's screen would quietly revoke the entire group —
+    # a much larger action than the button appears to offer.
+    if existing.get("tenant_id") is None:
+        raise HTTPException(
+            status_code=409,
+            detail="They oversee the whole group. Remove them from the group's Team instead.",
+        )
+    ok = database.db_org_member_remove(clerk_user_id, org_of_store)
+    deps.audit_log(
+        "user", "org_store_manager_removed", actor_id=user_id, resource_type="tenant",
+        resource_id=tenant["id"],
+        details={"clerk_user_id": clerk_user_id, "client_id": tenant.get("client_id"), "ok": ok},
+        request=request,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not remove that manager.")
+    return {"ok": True, "clerk_user_id": clerk_user_id}

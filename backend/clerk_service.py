@@ -242,6 +242,25 @@ def _clerk_relink_user_to_tenant(
     return displaced
 
 
+def clerk_user_id_for_email(email: str) -> Optional[str]:
+    """The Clerk user id for an address, or None if they have no account yet.
+
+    Public wrapper so callers can check who an invite would land on BEFORE writing.
+    Returns None on any failure — the caller then proceeds as if the account is new,
+    which is the existing behaviour and never blocks an invite on a Clerk hiccup.
+    """
+    secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not secret:
+        return None
+    try:
+        ids = _clerk_user_ids_for_email(
+            email, {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
+        )
+        return ids[0] if ids else None
+    except Exception:
+        return None
+
+
 def _clerk_revoke_invitations_for_email(email: str, headers: dict) -> dict:
     """Revoke any PENDING Clerk invitation for this address.
 

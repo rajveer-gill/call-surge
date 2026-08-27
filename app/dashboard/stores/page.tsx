@@ -61,6 +61,12 @@ type Totals = {
   bookings_change_pct: number | null
 }
 
+type StoreManagers = {
+  managers: { clerk_user_id: string; email?: string | null; is_you?: boolean }[]
+  pending_invites: { email: string }[]
+  can_manage: boolean
+}
+
 type OrgInfo = {
   org_id: string
   name: string
@@ -879,6 +885,40 @@ function InviteManagerModal({
    *  that is not coming. */
   const [result, setResult] = useState<{ emailed: boolean; relinked: boolean } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [people, setPeople] = useState<StoreManagers | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  const loadPeople = useCallback(async () => {
+    try {
+      const { data } = await api.get<StoreManagers>(
+        `/api/org/stores/${encodeURIComponent(store.client_id)}/managers`
+      )
+      setPeople(data)
+    } catch {
+      // Keep the invite form usable even if the list cannot load — being unable to
+      // see who is on a store should not stop you adding someone.
+      setPeople({ managers: [], pending_invites: [], can_manage: true })
+    }
+  }, [api, store.client_id])
+
+  useEffect(() => {
+    void loadPeople()
+  }, [loadPeople])
+
+  const removeManager = async (clerkUserId: string) => {
+    setRemoving(clerkUserId)
+    setError(null)
+    try {
+      await api.delete(
+        `/api/org/stores/${encodeURIComponent(store.client_id)}/managers/${encodeURIComponent(clerkUserId)}`
+      )
+      await loadPeople()
+    } catch (err) {
+      setError(detailOf(err) || 'Could not remove them.')
+    } finally {
+      setRemoving(null)
+    }
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -894,6 +934,8 @@ function InviteManagerModal({
         emailed: Boolean(data?.invite_sent),
         relinked: Boolean(data?.user_added),
       })
+      setEmail('')
+      await loadPeople()
     } catch (err) {
       setError(detailOf(err) || 'Could not send the invite. Please try again.')
     } finally {
@@ -902,7 +944,7 @@ function InviteManagerModal({
   }
 
   return (
-    <ModalShell title={`Invite manager · ${store.name}`} onClose={onClose}>
+    <ModalShell title={`Managers · ${store.name}`} onClose={onClose}>
       {result ? (
         <div className="space-y-4">
           {result.emailed ? (
@@ -938,9 +980,47 @@ function InviteManagerModal({
         </div>
       ) : (
         <form onSubmit={submit} className="space-y-4">
+          <div>
+            <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">
+              On this store now
+            </p>
+            {people === null ? (
+              <p className="text-sm text-zinc-500">Loading…</p>
+            ) : people.managers.length === 0 && people.pending_invites.length === 0 ? (
+              <p className="text-sm text-zinc-500">Nobody yet.</p>
+            ) : (
+              <ul className="space-y-1">
+                {people.managers.map((m) => (
+                  <li key={m.clerk_user_id} className="flex items-center gap-2 text-sm text-zinc-300">
+                    <span className="min-w-0 flex-1 truncate">
+                      {m.email || m.clerk_user_id}
+                      {m.is_you && <span className="ml-2 text-xs text-zinc-500">(you)</span>}
+                    </span>
+                    {people.can_manage && !m.is_you && (
+                      <button
+                        type="button"
+                        disabled={removing === m.clerk_user_id}
+                        onClick={() => void removeManager(m.clerk_user_id)}
+                        className="rounded-lg px-2 py-0.5 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </li>
+                ))}
+                {people.pending_invites.map((p) => (
+                  <li key={p.email} className="flex items-center gap-2 text-sm text-zinc-500">
+                    <span className="min-w-0 flex-1 truncate">{p.email}</span>
+                    <span className="text-xs">invited, not signed in</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           <p className="text-sm text-zinc-400">
-            If they don&rsquo;t have an account yet we&rsquo;ll email them an invitation. Either way
-            they see only this store — never the group rollup or your other stores.
+            Add as many as you need. If they don&rsquo;t have an account yet we&rsquo;ll email them
+            an invitation. Either way they see only this store — never the group rollup or your
+            other stores.
           </p>
           <div>
             <label className="mb-1 block text-sm font-medium text-zinc-300">Email</label>

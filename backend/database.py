@@ -1644,6 +1644,71 @@ def db_org_member_role(clerk_user_id: str, org_id: str) -> Optional[str]:
         return None
 
 
+def db_store_managers(org_id: str, tenant_id: str) -> List[dict]:
+    """Everyone scoped to ONE store — the managers invited from that store's row.
+
+    Separate from db_org_members, which deliberately lists only whole-group people.
+    A store manager is not an overseer of the group and must not appear as one.
+    """
+    if not org_id or not tenant_id:
+        return []
+    conn = _get_conn()
+    if not conn:
+        raise DatabaseUnavailable("no connection for db_store_managers")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT clerk_user_id, role, created_at FROM org_members "
+            "WHERE org_id = %s::uuid AND tenant_id = %s::uuid ORDER BY created_at",
+            (org_id, tenant_id),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "clerk_user_id": r[0],
+                "role": r[1],
+                "created_at": r[2].isoformat() if r[2] else None,
+            }
+            for r in rows
+        ]
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        _log.error("db_store_managers_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        raise DatabaseUnavailable(f"could not list store managers: {type(e).__name__}") from e
+
+
+def db_org_member_scope(clerk_user_id: str, org_id: str) -> Optional[dict]:
+    """This user's single row in the group: {role, tenant_id} or None.
+
+    org_members is PRIMARY KEY (clerk_user_id, org_id) — one row per person per
+    group — so a person is scoped to the whole group OR to exactly one store, never
+    to two. Callers need to see the existing scope before writing, because the
+    upsert would otherwise MOVE them silently.
+    """
+    uid = (clerk_user_id or "").strip()
+    if not uid or not org_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, tenant_id FROM org_members WHERE clerk_user_id = %s AND org_id = %s::uuid",
+            (uid, org_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return {"role": row[0], "tenant_id": str(row[1]) if row[1] else None}
+    except Exception as e:
+        _log.warning("db_org_member_scope_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        return None
+
+
 def db_org_members(org_id: str) -> List[dict]:
     """Whole-group members of an org, strongest role first.
 
