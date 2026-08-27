@@ -607,6 +607,7 @@ def admin_delete_org(
     org_id: str,
     request: Request,
     force: bool = False,
+    cancel_subscription: bool = False,
     admin: str = Depends(deps.require_admin),
 ):
     """Delete a group. Members and pending invites go with it; stores do NOT.
@@ -648,7 +649,24 @@ def admin_delete_org(
                 detail=(
                     f"This group still has an active Stripe subscription ({sub_id}). "
                     "Deleting the group would leave it billing with nothing pointing at it. "
-                    "Cancel that subscription in Stripe first, then delete the group."
+                    "Delete it with cancel_subscription=true to cancel that subscription "
+                    "as part of the delete, or cancel it in Stripe first."
+                ),
+            )
+    cancelled: Optional[dict] = None
+    if sub_id and cancel_subscription:
+        # Cancel BEFORE deleting the group. The other order loses the only record
+        # linking us to the subscription, so a failure there would leave it billing
+        # with nothing left to find it by — the exact outcome the guard exists for.
+        from routers import billing as billing_router
+
+        cancelled = billing_router.cancel_org_subscription(org_id, sub_id)
+        if not cancelled.get("ok"):
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Could not cancel the subscription, so the group was left alone: "
+                    + str(cancelled.get("error") or "unknown error")
                 ),
             )
     ok = database.db_org_delete(org_id)
@@ -659,6 +677,7 @@ def admin_delete_org(
         resource_type="org",
         resource_id=org_id,
         details={
+            "cancelled_subscription": (cancelled or {}).get("subscription_id"),
             "name": org.get("name"),
             "stores_detached": store_count,
             "had_subscription": bool(sub_id),

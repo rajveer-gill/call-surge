@@ -372,18 +372,34 @@ export function OrgCard({
         // It is offered here, but behind typed confirmation rather than a click,
         // because the damage it describes is billing that nothing can find again.
         const detail = detailOf(e) || 'The group could not be deleted.'
+        // Offer the safe resolution first. Cancelling then deleting leaves nothing
+        // billing and nothing orphaned; forcing leaves a live subscription that
+        // nothing in the app can find again, so it is the fallback, not the default.
         const typed = window.prompt(
           `${detail}
 
-To delete it anyway and leave that billing orphaned, type FORCE.`,
+Type CANCEL to cancel that subscription and delete the group.
+` +
+            `Type FORCE to delete the group anyway and leave the subscription billing.`,
           ''
         )
-        if ((typed || '').trim().toUpperCase() !== 'FORCE') {
-          onError('Left the group alone.')
+        const choice = (typed || '').trim().toUpperCase()
+        if (choice === 'CANCEL') {
+          await api.delete(
+            `/api/admin/orgs/${org.id}?force=true&cancel_subscription=true`,
+            adminApi
+          )
+          onSuccess(`Cancelled the subscription and deleted group "${org.name}".`)
           return
         }
-        await api.delete(`/api/admin/orgs/${org.id}?force=true`, adminApi)
-        onSuccess(`Force-deleted group "${org.name}". Its Stripe subscription is now unlinked — cancel it manually.`)
+        if (choice === 'FORCE') {
+          await api.delete(`/api/admin/orgs/${org.id}?force=true`, adminApi)
+          onSuccess(
+            `Force-deleted group "${org.name}". Its Stripe subscription is still live and nothing points at it — cancel it in Stripe.`
+          )
+          return
+        }
+        onError('Left the group alone.')
       }
     })
 

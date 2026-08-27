@@ -546,6 +546,77 @@ def move_org_subscription_to_price(org_id: str) -> dict:
         return out
 
 
+def cancel_org_subscription(org_id: str, sub_id: str) -> dict:
+    """Cancel a group's subscription outright, for deleting the group.
+
+    Immediate, unlike the empty-group path: the group is about to stop existing, so
+    there is nothing left to un-cancel and no period worth preserving. Already-
+    cancelled counts as success — the goal is "no longer billing", not "I was the
+    one who stopped it".
+    """
+    out = {"ok": False, "subscription_id": sub_id, "error": None}
+    if not (STRIPE_AVAILABLE and stripe):
+        out["error"] = "Stripe library not available"
+        return out
+    try:
+        stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if not stripe.api_key:
+            out["error"] = "STRIPE_SECRET_KEY is not set"
+            return out
+        sub = _plain(stripe.Subscription.retrieve(sub_id))
+        if sub.get("status") in ("canceled", "incomplete_expired"):
+            out["ok"] = True
+            out["already"] = True
+            return out
+        stripe.Subscription.cancel(sub_id)
+        out["ok"] = True
+        logger.info("org_subscription_cancelled org=%s sub=%s reason=group_deleted", org_id, sub_id)
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        logger.error(
+            "org_cancel_failed org=%s sub=%s err=%s: %s", org_id, sub_id, type(e).__name__, e
+        )
+    return out
+
+
+def _stop_billing_empty_org(org_id: str, sub_id: str) -> dict:
+    """Schedule cancellation for a group with no stores left.
+
+    At period end, not immediately: they have paid for this period, an immediate
+    cancel raises refund questions nobody asked, and a store added back before the
+    period ends simply un-schedules it. Reversible is the right default for an
+    action taken automatically on the customer's behalf.
+    """
+    out = {"synced": True, "quantity": 0, "cancel_scheduled": False}
+    try:
+        stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        sub = _plain(stripe.Subscription.retrieve(sub_id))
+        if sub.get("status") in ("canceled", "incomplete_expired"):
+            return out
+        if sub.get("cancel_at_period_end"):
+            out["cancel_scheduled"] = True
+            return out
+        stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+        out["cancel_scheduled"] = True
+        logger.info("org_billing_stopped org=%s sub=%s reason=no_stores_left", org_id, sub_id)
+    except Exception as e:
+        logger.error(
+            "org_stop_billing_failed org=%s sub=%s err=%s: %s",
+            org_id, sub_id, type(e).__name__, e,
+        )
+        try:
+            import alerts
+
+            alerts.notify_failure(
+                "billing", "org_stop_billing_failed", org_id,
+                f"Org {org_id} has no stores but its subscription is still billing",
+                payload={"error": str(e), "subscription": sub_id},
+            )
+        except Exception:
+            pass
+    return out
+
+
 def sync_org_subscription_quantity(org_id: str) -> dict:
     """Point the org's subscription quantity at its real store count.
 
@@ -563,7 +634,15 @@ def sync_org_subscription_quantity(org_id: str) -> dict:
     sub_id = (org.get("stripe_subscription_id") or "").strip()
     if not sub_id:
         return out  # not paying yet — quantity is set at checkout
-    count = max(1, database.db_org_store_count(org_id))
+    raw_count = database.db_org_store_count(org_id)
+    if raw_count <= 0:
+        # No stores left. The floor below used to keep this at 1, so a group that
+        # closed its last location went on paying for a store it did not have.
+        # Schedule the cancellation rather than cancelling outright: they keep what
+        # they already paid for until the period ends, and adding a store back before
+        # then puts it straight back (see the un-schedule below).
+        return _stop_billing_empty_org(org_id, sub_id)
+    count = max(1, raw_count)
     try:
         stripe.api_key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
         item_id, current = _org_subscription_item(sub_id)
@@ -571,6 +650,19 @@ def sync_org_subscription_quantity(org_id: str) -> dict:
             return out
         if current == count:
             return {"synced": True, "quantity": count}
+        # If billing was stopped when the group emptied, a store coming back has to
+        # un-schedule that cancellation — otherwise they have stores again and the
+        # subscription still dies at period end.
+        try:
+            existing = _plain(stripe.Subscription.retrieve(sub_id))
+            if existing.get("cancel_at_period_end"):
+                stripe.Subscription.modify(sub_id, cancel_at_period_end=False)
+                logger.info("org_billing_resumed org=%s sub=%s", org_id, sub_id)
+        except Exception as e:
+            logger.warning(
+                "org_resume_billing_check_failed org=%s err=%s: %s",
+                org_id, type(e).__name__, e,
+            )
         stripe.Subscription.modify(
             sub_id,
             items=[{"id": item_id, "quantity": count}],
