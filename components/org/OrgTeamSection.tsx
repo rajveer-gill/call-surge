@@ -221,7 +221,11 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
 
       {data.pending_invites.length > 0 && (
         <div className="mb-6">
-          <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">Invited, not yet signed in</p>
+          <p className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">Invited, not yet signed in</p>
+          <p className="mb-2 text-xs text-zinc-600">
+            They get access the first time they sign in with that email. Until then
+            they have none.
+          </p>
           <ul className="space-y-1">
             {data.pending_invites.map((p) => (
               <li key={p.email} className="flex items-center gap-2 text-sm text-zinc-400">
@@ -240,18 +244,41 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
             e.preventDefault()
             const email = inviteEmail.trim()
             if (!email) return
-            void run(
-              'invite',
-              async () => {
-                await api.post('/api/org/members', {
-                  email,
-                  role: inviteRole,
-                  org_id: orgId,
-                })
+            // "Invited" covered three different outcomes, one of which sends no
+            // email at all. The API distinguishes them; say which happened rather
+            // than leaving someone waiting on a message that was never sent.
+            setBusy('invite')
+            setError(null)
+            setNotice(null)
+            void (async () => {
+              try {
+                const { data } = await api.post<{
+                  added?: boolean
+                  invite_sent?: boolean
+                  pending?: boolean
+                  clerk_error?: string | null
+                }>('/api/org/members', { email, role: inviteRole, org_id: orgId })
                 setInviteEmail('')
-              },
-              `Invited ${email}.`
-            )
+                if (data.added) {
+                  setNotice(`${email} already had an account and now has access. No email was sent.`)
+                } else if (data.invite_sent) {
+                  setNotice(`Invite email sent to ${email}. They get access when they sign in with that address.`)
+                } else if (data.pending) {
+                  setNotice(
+                    `${email} is on the list and will get access when they sign up with that address — but no email was sent${
+                      data.clerk_error ? `: ${data.clerk_error}` : '.'
+                    } Send them the link yourself.`
+                  )
+                } else {
+                  setNotice(`Invited ${email}.`)
+                }
+                await load()
+              } catch (e) {
+                setError(detailOf(e) || 'That did not work.')
+              } finally {
+                setBusy(null)
+              }
+            })()
           }}
         >
           <label className="block">
