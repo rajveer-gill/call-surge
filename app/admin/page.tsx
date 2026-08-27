@@ -47,6 +47,8 @@ type InviteLinkResult = {
 }
 
 type OpsSelfCheck = {
+  frontend_url?: string | null
+  frontend_url_ok?: boolean
   public_base_url_set?: boolean
   twilio_signature_validation_enabled?: boolean
   cron_secret_set?: boolean
@@ -385,6 +387,14 @@ export default function AdminPage() {
             </div>
             {opsCheck ? (
               <div className="grid gap-2">
+                {/* The VALUE, not a tick. Every invitation link is built from it,
+                    so set-but-wrong sends invitees to the other environment and the
+                    invite cannot be redeemed — a boolean cannot show that. */}
+                {opsCheckRow(
+                  'FRONTEND_URL (invite links)',
+                  opsCheck.frontend_url_ok,
+                  opsCheck.frontend_url || 'not set'
+                )}
                 {opsCheckRow('PUBLIC_BASE_URL set', opsCheck.public_base_url_set)}
                 {opsCheckRow('Twilio signature validation', opsCheck.twilio_signature_validation_enabled)}
                 {opsCheckRow('CRON_SECRET set', opsCheck.cron_secret_set)}

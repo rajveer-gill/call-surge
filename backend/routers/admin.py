@@ -827,7 +827,20 @@ def admin_ops_self_check(_: str = Depends(deps.require_admin)):
     stt_provider = (os.getenv("VOICE_STT_PROVIDER") or "twilio").strip().lower()
     deepgram_key_set = bool((os.getenv("DEEPGRAM_API_KEY") or "").strip())
     redis_health = redis_ops_health()
+    # Reported as a VALUE, not a boolean. Every invitation link is built from this,
+    # so a set-but-wrong FRONTEND_URL sends invitees to the other environment's app
+    # and a different Clerk instance — the invite arrives, looks right, and cannot
+    # be redeemed. "Is it set" cannot catch that; only reading it can. It is the
+    # site's own public address, so there is nothing here to leak to an admin.
+    frontend_url = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
+    frontend_url_ok = bool(
+        frontend_url
+        and frontend_url.startswith("https://")
+        and frontend_url.count("/") == 2  # scheme + host only, no path
+    )
     return {
+        "frontend_url": frontend_url or None,
+        "frontend_url_ok": frontend_url_ok,
         "public_base_url_set": public_base_url_set,
         "twilio_signature_validation_enabled": twilio_auth_token_set,
         "cron_secret_set": cron_secret_set,

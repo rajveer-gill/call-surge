@@ -369,3 +369,24 @@ def test_cancel_reports_when_the_link_could_not_be_killed(monkeypatch):
     assert out["ok"] is True
     assert out["link_revoked"] is False
     assert out["clerk_error"] == "list 500"
+
+
+def test_self_check_reports_the_frontend_url_value_not_just_that_it_is_set(monkeypatch):
+    """Invitation links are built from FRONTEND_URL. Set-but-wrong sends invitees to
+    the other environment's app and a different Clerk instance, where the invite
+    cannot be redeemed. A boolean cannot catch that."""
+    import routers.admin as admin
+
+    monkeypatch.setenv("FRONTEND_URL", "https://www.call-surge.com")
+    monkeypatch.setattr(admin.runtime, "USE_DB", False, raising=False)
+    out = admin.admin_ops_self_check(_="admin")
+    assert out["frontend_url"] == "https://www.call-surge.com"
+    assert out["frontend_url_ok"] is True
+
+
+def test_self_check_flags_a_frontend_url_with_a_path(monkeypatch):
+    import routers.admin as admin
+
+    monkeypatch.setenv("FRONTEND_URL", "https://www.call-surge.com/dashboard")
+    monkeypatch.setattr(admin.runtime, "USE_DB", False, raising=False)
+    assert admin.admin_ops_self_check(_="admin")["frontend_url_ok"] is False
