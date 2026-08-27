@@ -157,12 +157,26 @@ def get_org_me(user_id: str = Depends(deps.require_user)):
         if _consume_pending_org_invites(user_id):
             orgs = database.db_org_memberships(user_id)
         if not orgs:
+            logger.info(
+                "org_me user=%s memberships=none (no rows, no pending invite matched)"
+                " -> is_org_member=False",
+                (user_id or "")[:14],
+            )
             return {"is_org_member": False, "orgs": [], "store_count": 0}
     # A manager invited to one store is an org member in the database, but they are
     # not an overseer: no switcher, no rollup, no group billing. They see that single
     # store and it resolves like any other dashboard, so report them as a normal owner.
+    scoped_only = [o for o in orgs if o.get("tenant_id")]
     orgs = [o for o in orgs if not o.get("tenant_id")]
     if not orgs:
+        # This decides whether someone is shown their group or asked to create a
+        # business, and the answer is invisible from the outside. Log which of the
+        # two "no" cases it is: no rows at all (wrong account, invite never applied)
+        # versus rows that are all store-scoped (invited to a store, not the group).
+        logger.info(
+            "org_me user=%s memberships=0_org_wide store_scoped=%s -> is_org_member=False",
+            (user_id or "")[:14], len(scoped_only),
+        )
         return {"is_org_member": False, "orgs": [], "store_count": 0}
     stores = database.db_org_stores_for_user(user_id)
     # Attach billing state per org so the UI can prompt a manager to set up payment
@@ -172,6 +186,9 @@ def get_org_me(user_id: str = Depends(deps.require_user)):
         o["subscription_status"] = billing.get("subscription_status")
         o["billing_active"] = evaluate_billing(billing)["active"] if billing else False
         o["store_count"] = database.db_org_store_count(o["org_id"])
+    logger.info(
+        "org_me user=%s org_wide=%s -> is_org_member=True", (user_id or "")[:14], len(orgs)
+    )
     return {
         "is_org_member": True,
         "orgs": orgs,
