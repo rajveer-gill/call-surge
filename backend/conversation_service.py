@@ -222,7 +222,50 @@ def _caller_indicated_stylist_choice(
             continue
         if re.search(rf"\b{re.escape(nl)}\b", t):
             return True
+        if _name_said_aloud(nl, t):
+            return True
     return False
+
+
+def _name_said_aloud(name_lower: str, text_lower: str) -> bool:
+    """Did the caller say this name, allowing for how speech comes back?
+
+    The roster spelled "Terrance"; the caller said "Terrence" and the transcript came
+    back "Terence". Exact matching decided no stylist had been named and asked again
+    — and again, because the caller kept saying the same word. One vowel, and the
+    call could not complete.
+
+    Guarded by a shared three-letter prefix rather than distance alone. Distance <= 2
+    on its own also matches Tyler against Taylor, which are different people; the
+    prefix separates a mis-heard spelling from a genuinely different name, because
+    speech errors land in the middle and end of a name far more than the start.
+    """
+    if len(name_lower) < 4:
+        return False
+    head = name_lower[:3]
+    for token in re.findall(r"[a-z']+", text_lower):
+        if len(token) < 4 or abs(len(token) - len(name_lower)) > 1:
+            continue
+        if token[:3] != head:
+            continue
+        if _edit_distance_at_most(token, name_lower, 2):
+            return True
+    return False
+
+
+def _edit_distance_at_most(a: str, b: str, limit: int) -> bool:
+    """Levenshtein distance <= limit. Small strings, so clarity over cleverness."""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return False
+        prev = cur
+    return prev[-1] <= limit
 
 
 def _caller_indicated_service_choice(
