@@ -85,11 +85,24 @@ def test_a_manager_may_do_anything(method):
 
 
 def test_an_unknown_role_is_treated_as_read_only(monkeypatch):
-    """A typo or a future role must fail closed, never grant write."""
+    """A typo or an unrecognised role must fail closed, never grant write.
+
+    "owner" used to be in this list as a stand-in for "a role we do not know". It is
+    a real role now and outranks manager, so it moved to the test below. The
+    fail-closed rule is unchanged: anything NOT in ORG_ROLES still gets nothing.
+    """
     monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
-    for role in ("", "   ", "owner", "admin", None):
+    for role in ("", "   ", "admin", "superuser", None):
         with pytest.raises(HTTPException):
             deps._enforce_org_write_role(_Req(method="POST"), role, "u", "shop-a")
+
+
+def test_an_owner_may_write(monkeypatch):
+    """The head account must not be read-only. This gate asked role == "manager",
+    so introducing a role ABOVE manager silently made the owner read-only across
+    the whole product."""
+    monkeypatch.setattr(deps, "audit_log", lambda *a, **k: None)
+    deps._enforce_org_write_role(_Req(method="POST"), "owner", "u", "shop-a")
 
 
 # --- Containment (needs Postgres: the scope lives in the SQL join) ------------

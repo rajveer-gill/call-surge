@@ -344,7 +344,9 @@ def _enforce_org_write_role(request: Request, role: str, user_id: str, client_id
     single-store fallback — because a gate that only one of them applies is a gate you
     can walk around by omitting a header.
     """
-    if (role or "viewer").strip().lower() == "manager":
+    # Rank, not equality. This read == "manager", so adding a stronger role made
+    # the OWNER read-only everywhere — the one account that must never be.
+    if database.org_role_at_least(role, "manager"):
         return
     if request.method.upper() in _READ_ONLY_METHODS:
         return

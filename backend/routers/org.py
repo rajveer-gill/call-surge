@@ -43,7 +43,7 @@ def _require_org_manager(user_id: str, org_id: Optional[str] = None) -> dict:
     memberships = [
         m
         for m in database.db_org_memberships_org_wide(user_id)
-        if m.get("role") == "manager"
+        if database.org_role_at_least(m.get("role"), "manager")
     ]
     if not memberships:
         raise HTTPException(
@@ -177,7 +177,9 @@ def get_org_me(user_id: str = Depends(deps.require_user)):
         "orgs": orgs,
         "store_count": len(stores),
         # Convenience for the UI: the weakest role wins for hiding write controls.
-        "can_edit_any": any((o.get("role") or "") == "manager" for o in orgs),
+        # Rank, not equality: an owner outranks a manager and must not read as
+        # less. This hid the "Your stores" link from the head account.
+        "can_edit_any": any(database.org_role_at_least(o.get("role"), "manager") for o in orgs),
     }
 
 
@@ -410,7 +412,7 @@ def invite_store_manager(
     scoped = database.db_org_store_for_user(user_id, store_ref)
     if not scoped:
         raise HTTPException(status_code=403, detail="You do not have access to that store.")
-    if (scoped.get("role") or "viewer") != "manager":
+    if not database.org_role_at_least(scoped.get("role"), "manager"):
         raise HTTPException(
             status_code=403, detail="Your account can view this store but not change it."
         )
@@ -585,7 +587,7 @@ def invite_org_member(
     role = (req.role or "manager").strip().lower()
     if role not in database.ORG_ROLES:
         raise HTTPException(status_code=400, detail="Unknown role.")
-    if role == "owner":
+    if role == "owner":  # role-value-check: is the REQUESTED role owner, not a rank
         # Inviting straight to owner would hand the business to an address that has
         # not accepted anything yet — and would leave two owners if it were honoured.
         raise HTTPException(
@@ -633,7 +635,7 @@ def update_org_member_role(
     target_role = database.db_org_member_role(clerk_user_id, oid)
     if target_role is None:
         raise HTTPException(status_code=404, detail="That person does not oversee this group.")
-    if role == "owner":
+    if role == "owner":  # role-value-check: is the REQUESTED role owner, not a rank
         # A group has exactly one owner. Promoting a second would leave two, and
         # "the owner" stops meaning anything. Ownership moves by transfer, which
         # demotes the incumbent in the same transaction.

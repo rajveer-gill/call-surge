@@ -382,7 +382,7 @@ export default function StoresPage() {
                 {sorted.map((s) => {
                   const rate = missedRate(s.calls, s.missed)
                   const concerning = rate !== null && rate >= 20
-                  const canManage = s.role === 'manager'
+                  const canManage = orgRoleAtLeast(s.role, 'manager')
                   return (
                     <div key={s.client_id}>
                     <div

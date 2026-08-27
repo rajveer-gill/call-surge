@@ -2046,7 +2046,7 @@ def db_org_store_for_user(clerk_user_id: str, store_ref: str) -> Optional[dict]:
             WHERE om.clerk_user_id = %s AND (t.client_id = %s OR t.id::text = %s)
             -- Someone can hold both an org-wide and a store-scoped row; the stronger
             -- role wins rather than whichever Postgres happens to return first.
-            ORDER BY CASE WHEN om.role = 'manager' THEN 0 ELSE 1 END
+            ORDER BY CASE om.role WHEN 'owner' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END
             LIMIT 1
             """,
             (uid, ref, ref),

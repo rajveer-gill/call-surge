@@ -607,7 +607,7 @@ def _resolve_managed_org(user_id: str, org_id: Optional[str]) -> dict:
     managed = [
         m
         for m in database.db_org_memberships_org_wide(user_id)
-        if m.get("role") == "manager"
+        if database.org_role_at_least(m.get("role"), "manager")
     ]
     if not managed:
         raise HTTPException(status_code=403, detail="Your account cannot manage billing.")
