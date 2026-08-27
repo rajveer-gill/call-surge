@@ -16,6 +16,7 @@ import {
 import { AppChrome } from '@/components/layout/AppChrome'
 import { CarrierForwardingInstructions } from '@/components/CarrierForwardingInstructions'
 import { useApiClient, setSelectedStoreId } from '@/lib/api'
+import { UserButton } from '@clerk/nextjs'
 import { orgRoleAtLeast } from '@/lib/orgRoles'
 import { OrgTeamSection } from '@/components/org/OrgTeamSection'
 
@@ -242,6 +243,10 @@ export default function StoresPage() {
                   Add store
                 </button>
               )}
+              {/* Sign-out lived only on /dashboard. A group member always lands here
+                  and never sees that page, so they had no way to sign out at all —
+                  worse on a shared salon computer than on a personal one. */}
+              <UserButton afterSignOutUrl="/" />
             </div>
           </div>
 
