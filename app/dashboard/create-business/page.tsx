@@ -133,11 +133,21 @@ export default function CreateBusinessPage() {
   // tenant also has can_use_app (its access comes from a billing exemption), but it
   // must still reach this form — this is the only way to activate.
   useEffect(() => {
-    api
-      .get('/api/subscription')
-      .then((r) => {
+    Promise.all([
+      api.get('/api/subscription'),
+      // Someone invited to oversee a group owns no store of their own, so
+      // can_use_app is false and this form kept them — asking them to build the
+      // business they were just invited to. The sign-up link carries a redirect,
+      // but that only covers the first arrival; signing in later landed here again.
+      api.get('/api/org/me').catch(() => null),
+    ])
+      .then(([r, orgRes]) => {
         if (r?.data?.can_use_app && !r?.data?.demo_mode) {
           router.replace('/dashboard')
+          return
+        }
+        if (orgRes?.data?.is_org_member) {
+          router.replace('/dashboard/stores')
           return
         }
         setIsDemo(Boolean(r?.data?.demo_mode))
