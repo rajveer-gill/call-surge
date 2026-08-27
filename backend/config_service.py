@@ -674,6 +674,19 @@ def transfer_takes_message(info: Optional[dict] = None) -> bool:
     return bool(data.get("transfer_takes_message", False))
 
 
+def quotes_prices(info: Optional[dict] = None) -> bool:
+    """True when the AI may say what a service costs.
+
+    Some businesses do not quote over the phone at all — the price depends on the
+    stylist, hair length, or what they find in the chair, and a number said out loud
+    becomes a promise the shop has to honour. Defaults to True so nothing changes for
+    anyone who has not thought about it.
+    """
+    data = info if info is not None else get_business_info()
+    v = data.get("quote_prices")
+    return True if v is None else bool(v)
+
+
 def human_handoff_configured(info: Optional[dict] = None) -> bool:
     """True when the AI has a way to hand a caller off to a human.
 

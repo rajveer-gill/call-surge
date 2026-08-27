@@ -215,6 +215,7 @@ export default function Settings() {
     hours: '',
     forwarding_phone: '',
     transfer_takes_message: false,
+    quote_prices: true,
     email: '',
     address: '',
     menu_link: '',
@@ -368,6 +369,8 @@ export default function Settings() {
             hours: (d.hours as string) || '',
             forwarding_phone: (d.forwarding_phone as string) || '',
             transfer_takes_message: Boolean(d.transfer_takes_message),
+            // Absent means yes — the shape every existing tenant is already in.
+            quote_prices: d.quote_prices === undefined ? true : Boolean(d.quote_prices),
             email: (d.email as string) || '',
             address: (d.address as string) || '',
             menu_link: (d.menu_link as string) || '',
@@ -598,6 +601,7 @@ export default function Settings() {
         hours: form.hours || undefined,
         forwarding_phone: form.forwarding_phone || undefined,
         transfer_takes_message: form.transfer_takes_message,
+        quote_prices: form.quote_prices,
         email: form.email || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
@@ -1385,6 +1389,34 @@ export default function Settings() {
               />
             }
           />
+          {/* Sits under Services, because it is a fact about the menu above rather
+              than a call-handling preference. Off means the prices never reach the
+              AI at all — see prompts/receptionist.py; it cannot say what it was
+              never given. */}
+          <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-xl border border-gray-200 bg-white p-3 transition-colors hover:border-gray-300">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 shrink-0 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              checked={!form.quote_prices}
+              onChange={(e) => {
+                const next = !e.target.checked
+                setForm((f) => ({ ...f, quote_prices: next }))
+                void persistFields({ quote_prices: next }, 'Pricing')
+              }}
+            />
+            <span className="text-sm">
+              <span className="font-medium text-gray-900">
+                Don&rsquo;t give prices over the phone
+              </span>
+              <span className="mt-0.5 block text-gray-500">
+                The receptionist never states or estimates a cost. If a caller asks, it
+                says pricing depends on the stylist and is confirmed in person, then
+                offers to book them in. Your prices stay in the menu above for your own
+                reference &mdash; they are simply never sent to the AI.
+              </span>
+            </span>
+          </label>
+
           <SpecialsEditor
             items={specialItems}
             onChange={setSpecialItems}

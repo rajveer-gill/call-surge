@@ -40,6 +40,7 @@ def appointment_focus_guidance(
     *,
     include_booked_slots: bool = True,
     channel: Literal["voice", "sms"] = "voice",
+    quote_prices: bool = True,
 ) -> str:
     """
     Shared instructions: prioritize booking; brief off-topic answers then redirect.
@@ -51,9 +52,13 @@ def appointment_focus_guidance(
             return (
                 f"PRIMARY GOAL: Help them book an appointment at {biz}. "
                 "Steer every conversation toward scheduling when you can—ask for date, time, service, and name. "
-                "Answer business questions briefly (hours, location, services, prices, policies). "
-                "When they ask how much a service costs, answer from the configured service menu—never say you do not know if prices are listed. "
-                "If they text about unrelated topics (general knowledge, sports, trivia, jokes, random chat): give a brief, "
+                "Answer business questions briefly (hours, location, services, policies). "
+                + (
+                    "When they ask how much a service costs, answer from the configured service menu—never say you do not know if prices are listed. "
+                    if quote_prices
+                    else "This business does not quote prices. Never state, estimate or imply a cost; say pricing is confirmed in person and offer to book them in. "
+                )
+                + "If they text about unrelated topics (general knowledge, sports, trivia, jokes, random chat): give a brief, "
                 f"friendly answer, then bring it back to booking—e.g. end with \"…anyway, want to set up a time at {biz}?\" "
                 "Keep off-topic replies short and always close by offering to book. Stay warm; never be rude. If they only want info, answer and offer to book."
             )
@@ -65,10 +70,16 @@ def appointment_focus_guidance(
         return (
             f"PRIMARY GOAL: Your main job is helping callers book an appointment at {biz}. "
             "Move every turn toward scheduling when possible—name, date, time, stylist when applicable, and service. "
-            "Answer business-related questions briefly (hours, location, services, prices, policies, staff). "
-            "When they ask how much a service costs or what you charge, answer from the service menu in your context—"
-            "that is a business question, NOT off-topic. Never say you are unsure if the price is listed there. "
-            "If they ask something unrelated to the business (general knowledge, trivia, sports, jokes, chit-chat): "
+            "Answer business-related questions briefly (hours, location, services, policies, staff). "
+            + (
+                "When they ask how much a service costs or what you charge, answer from the service menu in your context—"
+                "that is a business question, NOT off-topic. Never say you are unsure if the price is listed there. "
+                if quote_prices
+                else "This business does not quote prices. A cost question is still a business question, not off-topic — "
+                "but never state, estimate or imply an amount. Say pricing depends on the stylist and what they need, "
+                "is confirmed in person, and offer to book them in. "
+            )
+            + "If they ask something unrelated to the business (general knowledge, trivia, sports, jokes, chit-chat): "
             "give a brief, friendly answer—a sentence or two—then bring it back to booking at the end of your reply, e.g. "
             f"finish with \"…anyway, would you like to book an appointment at {biz}?\" "
             "Keep off-topic answers short and close by offering to book. Do not let off-topic chat run long. Stay warm; never refuse rudely. "
@@ -114,7 +125,7 @@ def _format_duration_for_prompt(minutes: object) -> str:
     return f"about {m} min"
 
 
-def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
+def format_service_catalog_for_prompt(catalog: List[dict], quote_prices: bool = True) -> str:
     """
     Service menu for the system prompt: exact names for BOOKING plus voice guidance.
 
@@ -128,7 +139,11 @@ def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
         if not name:
             continue
         meta: List[str] = []
-        price = _format_price_for_prompt(entry.get("price"))
+        # When the business does not quote prices, the amounts are left OUT of the
+        # prompt rather than accompanied by an instruction not to say them. A rule
+        # can be argued with by a caller who pushes; a number the model was never
+        # given cannot be. Asked directly, it has nothing to read out.
+        price = _format_price_for_prompt(entry.get("price")) if quote_prices else ""
         duration = _format_duration_for_prompt(entry.get("duration_minutes"))
         if price:
             meta.append(price)
@@ -142,14 +157,28 @@ def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
     if not lines:
         return ""
     names_only = ", ".join(f'"{(e.get("name") or "").strip()}"' for e in catalog if (e.get("name") or "").strip())
-    has_any_price = any(_format_price_for_prompt(e.get("price")) for e in catalog)
-    pricing_note = (
-        "When they ask how much something costs, the price, or what you charge: answer using the dollar amounts above "
-        "for that service in natural speech (e.g. a long cut is around fifty dollars). "
-        "Never say you do not know or are not sure if the price is listed in this menu. "
-        if has_any_price
-        else "Prices are not configured in Settings for this business—if they ask cost, say the shop will confirm exact pricing when booking; do not treat price questions as off-topic. "
-    )
+    has_any_price = quote_prices and any(_format_price_for_prompt(e.get("price")) for e in catalog)
+    if not quote_prices:
+        # Distinct from "no prices configured": this shop HAS prices and has chosen
+        # not to say them. Refusing has to be warm and lead somewhere, or the caller
+        # simply hangs up and rings a salon that answered the question.
+        pricing_note = (
+            "This business does NOT quote prices over the phone. You do not have their prices "
+            "and must never state, estimate, guess, or imply a cost — not a number, not a range, "
+            "not 'around' anything, even if the caller insists or says another shop told them. "
+            "If they ask what something costs, say warmly that pricing depends on the stylist and "
+            "what they need, so the shop confirms it in person, and offer to book them in or take "
+            "a message for a callback. Never apologise repeatedly or make it sound like a refusal — "
+            "it is simply how this salon works. "
+        )
+    else:
+        pricing_note = (
+            "When they ask how much something costs, the price, or what you charge: answer using the dollar amounts above "
+            "for that service in natural speech (e.g. a long cut is around fifty dollars). "
+            "Never say you do not know or are not sure if the price is listed in this menu. "
+            if has_any_price
+            else "Prices are not configured in Settings for this business—if they ask cost, say the shop will confirm exact pricing when booking; do not treat price questions as off-topic. "
+        )
     return (
         "- Services menu (BOOKING reason field must use an exact name from this list):\n"
         + "\n".join(lines)
@@ -157,8 +186,12 @@ def format_service_catalog_for_prompt(catalog: List[dict]) -> str:
         "List service names in plain language (e.g. we offer short cuts and long cuts). "
         f"Valid names: {names_only}. "
         + pricing_note
-        + "Only mention price or length unprompted if it helps them choose; when they ask about cost, answer directly. "
-        "Never read internal labels, parentheses, decimals like 30.0, or phrasing like dollar-sign thirty comma thirty min."
+        + (
+            "Only mention length unprompted if it helps them choose. "
+            if not quote_prices
+            else "Only mention price or length unprompted if it helps them choose; when they ask about cost, answer directly. "
+        )
+        + "Never read internal labels, parentheses, decimals like 30.0, or phrasing like dollar-sign thirty comma thirty min."
     )
 
 
@@ -209,7 +242,13 @@ def build_system_prompt(
             nm = str(x).strip()
             if nm:
                 service_catalog.append({"id": "", "name": nm, "price": 0, "duration_minutes": ""})
-    services_prompt_block = format_service_catalog_for_prompt(service_catalog)
+    # Read off business_info rather than calling config_service, so the prompt is a
+    # pure function of what it was handed and a test can set it directly.
+    quote_prices = business_info.get("quote_prices")
+    quote_prices = True if quote_prices is None else bool(quote_prices)
+    services_prompt_block = format_service_catalog_for_prompt(
+        service_catalog, quote_prices=quote_prices
+    )
     has_configured_services = bool(service_catalog)
     service_id_to_name = {e["id"]: e["name"] for e in service_catalog if e.get("id")}
     specials_raw = business_info.get("specials") or []
@@ -311,7 +350,7 @@ def build_system_prompt(
             "- BOOKING POLICIES (follow exactly):\n"
             + "\n".join(f"  • {str(r).strip()}" for r in booking_rules if str(r).strip())
         )
-    if any(_format_price_for_prompt(e.get("price")) for e in service_catalog):
+    if quote_prices and any(_format_price_for_prompt(e.get("price")) for e in service_catalog):
         help_lines.append(
             "- Pricing: When callers ask how much a service costs, answer from the prices in the Services menu above."
         )
@@ -661,7 +700,10 @@ def build_system_prompt(
         )
 
     focus_block = appointment_focus_guidance(
-        name, include_booked_slots=include_booked_slots, channel="voice"
+        name,
+        include_booked_slots=include_booked_slots,
+        channel="voice",
+        quote_prices=quote_prices,
     )
     message_block = (
         "\n\nTAKING A MESSAGE: If the caller wants to leave a message for the business "
