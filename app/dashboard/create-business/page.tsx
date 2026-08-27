@@ -134,7 +134,12 @@ export default function CreateBusinessPage() {
   // must still reach this form — this is the only way to activate.
   useEffect(() => {
     Promise.all([
-      api.get('/api/subscription'),
+      // BOTH calls must be allowed to fail. /api/subscription answers 403 for a user
+      // with no tenant — which is precisely the person this page exists for, and the
+      // group member this redirect was written for. Unguarded, Promise.all rejected,
+      // the org check never ran, and even the decision log never printed, so the
+      // console showed nothing at all.
+      api.get('/api/subscription').catch(() => null),
       // Someone invited to oversee a group owns no store of their own, so
       // can_use_app is false and this form kept them — asking them to build the
       // business they were just invited to. The sign-up link carries a redirect,
@@ -149,6 +154,7 @@ export default function CreateBusinessPage() {
           can_use_app: r?.data?.can_use_app ?? null,
           demo_mode: r?.data?.demo_mode ?? null,
           is_org_member: orgRes?.data?.is_org_member ?? null,
+          subscription_lookup: r ? 'ok' : 'failed',
           org_lookup: orgRes ? 'ok' : 'failed',
         })
         if (r?.data?.can_use_app && !r?.data?.demo_mode) {
