@@ -356,14 +356,35 @@ export function OrgCard({
 
   const deleteOrg = () =>
     run(async () => {
-      // The backend refuses if the group still has stores or a live subscription;
-      // that 409 surfaces as an error message rather than being forced through here.
-      // Forcing is deliberately API-only — it's not a thing to have one click away.
       if (!window.confirm(`Delete the group "${org.name}"? Its members and pending invites go with it.`)) {
         return
       }
-      await api.delete(`/api/admin/orgs/${org.id}`, adminApi)
-      onSuccess(`Deleted group "${org.name}".`)
+      try {
+        await api.delete(`/api/admin/orgs/${org.id}`, adminApi)
+        onSuccess(`Deleted group "${org.name}".`)
+        return
+      } catch (e) {
+        const status = (e as { response?: { status?: number } })?.response?.status
+        if (status !== 409) throw e
+        // The backend refuses while a live subscription or stores remain. Forcing was
+        // API-only, so the console told the admin to "retry with force=true" and gave
+        // them no way to do it — an error naming an action the product did not offer.
+        // It is offered here, but behind typed confirmation rather than a click,
+        // because the damage it describes is billing that nothing can find again.
+        const detail = detailOf(e) || 'The group could not be deleted.'
+        const typed = window.prompt(
+          `${detail}
+
+To delete it anyway and leave that billing orphaned, type FORCE.`,
+          ''
+        )
+        if ((typed || '').trim().toUpperCase() !== 'FORCE') {
+          onError('Left the group alone.')
+          return
+        }
+        await api.delete(`/api/admin/orgs/${org.id}?force=true`, adminApi)
+        onSuccess(`Force-deleted group "${org.name}". Its Stripe subscription is now unlinked — cancel it manually.`)
+      }
     })
 
   const revokeInvite = (email: string) =>

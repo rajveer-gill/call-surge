@@ -636,17 +636,19 @@ def admin_delete_org(
                 status_code=409,
                 detail=(
                     f"This group still has {store_count} store(s). Detaching them here would "
-                    "stop them inheriting its subscription. Move or delete the stores first, "
-                    "or retry with force=true."
+                    "stop them inheriting its subscription. Move or delete the stores first."
                 ),
             )
         if sub_id:
+            # Name the subscription. "Cancel it in Stripe" is not actionable without
+            # knowing which one, and the console previously told the admin to "retry
+            # with force=true" — a parameter the UI had no way to send.
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "This group still has a Stripe subscription. Deleting it would leave that "
-                    "subscription billing with nothing pointing at it. Cancel it in Stripe "
-                    "first, or retry with force=true."
+                    f"This group still has an active Stripe subscription ({sub_id}). "
+                    "Deleting the group would leave it billing with nothing pointing at it. "
+                    "Cancel that subscription in Stripe first, then delete the group."
                 ),
             )
     ok = database.db_org_delete(org_id)
