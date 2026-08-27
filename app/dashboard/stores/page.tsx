@@ -16,6 +16,8 @@ import {
 import { AppChrome } from '@/components/layout/AppChrome'
 import { CarrierForwardingInstructions } from '@/components/CarrierForwardingInstructions'
 import { useApiClient, setSelectedStoreId } from '@/lib/api'
+import { orgRoleAtLeast } from '@/lib/orgRoles'
+import { OrgTeamSection } from '@/components/org/OrgTeamSection'
 
 type SetupStep = 'demo' | 'needs_number' | 'needs_setup' | 'needs_forwarding' | 'live'
 
@@ -110,9 +112,15 @@ export default function StoresPage() {
   // client_id of the store whose setup instructions are expanded.
   const [setupFor, setSetupFor] = useState<string | null>(null)
 
-  // Orgs this account manages (not just views) — only a manager can add stores or
-  // set up billing. A viewer sees the rollup and nothing else.
-  const managedOrgs = useMemo(() => orgs.filter((o) => o.role === 'manager'), [orgs])
+  // Orgs this account manages (not just views) — a manager or above can add stores
+  // and set up billing. A viewer sees the rollup and nothing else.
+  //
+  // This read `role === 'manager'`, which quietly excluded the owner once that role
+  // existed: the head account saw fewer buttons than its own managers.
+  const managedOrgs = useMemo(
+    () => orgs.filter((o) => orgRoleAtLeast(o.role, 'manager')),
+    [orgs]
+  )
   // A group that has stores but isn't paying yet: its stores can't take calls until
   // the manager sets up billing. Surface it, because it blocks everything else.
   const unbilledOrg = useMemo(
@@ -314,6 +322,21 @@ export default function StoresPage() {
               )}
             </>
           )}
+
+          {/* Group-level, so it belongs on the group page rather than in a single
+              store's settings. Only shown to someone who oversees a whole group —
+              a store-only manager has no group to run. */}
+          {/* One section per group, each naming its own org_id. Picking a group for
+              someone who oversees two would silently manage the wrong company —
+              which is the case the backend refuses to guess about. */}
+          {orgs.map((o) => (
+            <div className="mt-10" key={o.org_id}>
+              {orgs.length > 1 && (
+                <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">{o.name}</p>
+              )}
+              <OrgTeamSection api={api} orgId={o.org_id} />
+            </div>
+          ))}
 
           {sorted === null && (
             <div className="mt-10 flex justify-center">

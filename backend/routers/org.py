@@ -545,10 +545,27 @@ def list_org_members(
         raise HTTPException(status_code=503, detail="Database required")
     oid = _resolve_org_for_user(user_id, org_id)
     me = database.db_org_member_role(user_id, oid)
+    members = database.db_org_members(oid)
+    # Resolve each Clerk id to the email that person signs in with. A team screen
+    # listing user_3A6L7yXuDUCH... is not a team screen — nobody can tell which
+    # colleague to remove. Best-effort per row: if Clerk is unreachable the id is
+    # still shown, which is worse to read but never wrong.
+    for m in members:
+        m["email"] = None
+        m["is_you"] = m.get("clerk_user_id") == user_id
+        try:
+            link = deps._clerk_fetch_user_link(m.get("clerk_user_id") or "")
+            emails = (link or {}).get("emails") or []
+            if emails:
+                m["email"] = str(emails[0]).strip()
+        except Exception as e:
+            logger.warning(
+                "org_member_email_lookup_failed org=%s err=%s: %s", oid, type(e).__name__, e
+            )
     return {
         "org_id": oid,
         "your_role": me,
-        "members": database.db_org_members(oid),
+        "members": members,
         "pending_invites": database.db_org_invites_for_org(oid),
         # So the UI can hide controls that would only earn a 403.
         "can_manage": database.org_role_at_least(me, "manager"),
