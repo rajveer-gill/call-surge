@@ -21,14 +21,27 @@ export function orgRoleAtLeast(role: string | null | undefined, minimum: OrgRole
   return orgRoleRank(role) >= orgRoleRank(minimum)
 }
 
+/**
+ * Labels are group-scoped on purpose.
+ *
+ * "Manager" already means a STORE manager in this product — someone invited to one
+ * location from that store's page. Offering plain "Manager" on the group's Team
+ * panel read as that, so the group-level option looked missing when it was the one
+ * being offered. The stored value is still `manager`; only what people read
+ * changed.
+ */
 export const ORG_ROLE_LABEL: Record<string, string> = {
   owner: 'Owner',
-  manager: 'Manager',
+  manager: 'Group admin',
   viewer: 'Viewer',
 }
 
 export const ORG_ROLE_BLURB: Record<string, string> = {
-  owner: 'Runs the group. Can hand ownership to someone else.',
-  manager: 'Can run the group and manage people, but cannot change the owner.',
-  viewer: 'Can see the group, but cannot change anything.',
+  owner: 'Runs the whole group. Only one person can be Owner.',
+  manager: 'Full access to every store in the group, and can manage people — but cannot change the Owner.',
+  viewer: 'Can see every store in the group, but cannot change anything.',
 }
+
+/** Shown once beside the role picker, so the limits are stated before choosing. */
+export const ORG_ROLE_PICKER_HINT =
+  'Group admins get every store in the group. To give someone one store only, invite them from that store instead.'

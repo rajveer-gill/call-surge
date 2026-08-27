@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AxiosInstance } from 'axios'
 import { Users, UserPlus, ShieldCheck, Trash2, Loader2 } from 'lucide-react'
-import { ORG_ROLE_BLURB, ORG_ROLE_LABEL, orgRoleAtLeast } from '@/lib/orgRoles'
+import {
+  ORG_ROLE_BLURB,
+  ORG_ROLE_LABEL,
+  ORG_ROLE_PICKER_HINT,
+  orgRoleAtLeast,
+} from '@/lib/orgRoles'
 
 type Member = {
   clerk_user_id: string
@@ -108,8 +113,8 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
         <h2 className="font-display text-lg font-semibold text-white">Team</h2>
       </div>
       <p className="mb-4 text-sm text-zinc-500">
-        Who can see and run this group. Store-level managers are invited from each
-        store instead.
+        Who can see and run every store in this group. To give someone access to a
+        single store only, invite them from that store instead.
       </p>
 
       {orgs.length > 1 && (
@@ -173,7 +178,7 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
                   }
                   className="rounded-lg border border-white/15 bg-zinc-950 px-2 py-1 text-xs text-zinc-200"
                 >
-                  <option value="manager">Manager</option>
+                  <option value="manager">Group admin</option>
                   <option value="viewer">Viewer</option>
                 </select>
               )}
@@ -268,7 +273,7 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
               onChange={(e) => setInviteRole(e.target.value)}
               className="rounded-lg border border-white/15 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
             >
-              <option value="manager">Manager</option>
+              <option value="manager">Group admin</option>
               <option value="viewer">Viewer</option>
             </select>
           </label>
@@ -287,7 +292,8 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
           {/* Owner is absent from both selects on purpose: ownership moves by
               transfer, never by promotion, so there is only one owner at a time. */}
           <p className="w-full text-xs text-zinc-600">
-            To hand over the group, invite them as a manager first, then use “Make owner”.
+            {ORG_ROLE_PICKER_HINT} There is only one Owner — to hand the group over,
+            invite them as a Group admin first, then use “Make owner”.
           </p>
         </form>
       )}
