@@ -1288,8 +1288,23 @@ def db_tenant_get_for_user(
 # applies to them, and store owners are unaffected.
 
 # viewer = read-only oversight (what a franchise asked for); manager = may also
-# change store settings. Enforced at the auth seam in deps.require_tenant.
-ORG_ROLES = ("viewer", "manager")
+# change store settings; owner = the group's head account. Enforced at the auth seam
+# in deps.require_tenant, and for membership changes in routers/org.py.
+#
+# Ordered weakest to strongest — ORG_ROLE_RANK depends on this order, so append
+# rather than reorder.
+ORG_ROLES = ("viewer", "manager", "owner")
+ORG_ROLE_RANK = {r: i for i, r in enumerate(ORG_ROLES)}
+
+
+def org_role_rank(role: Optional[str]) -> int:
+    """Strength of a role. Unknown or missing reads as the weakest, never as strong,
+    so a typo or a NULL cannot grant privilege."""
+    return ORG_ROLE_RANK.get((role or "").strip().lower(), 0)
+
+
+def org_role_at_least(role: Optional[str], minimum: str) -> bool:
+    return org_role_rank(role) >= org_role_rank(minimum)
 
 
 def db_org_create(name: str) -> Optional[dict]:
@@ -1564,6 +1579,96 @@ def db_org_member_add(
     except Exception as e:
         print(f"[DB] Failed to add org member: {e}")
         return False
+
+
+def db_org_member_role(clerk_user_id: str, org_id: str) -> Optional[str]:
+    """This user's role over the WHOLE group, or None.
+
+    tenant_id IS NULL deliberately: a manager invited to one store is an org_members
+    row too, and must not read as oversight of the group.
+    """
+    uid = (clerk_user_id or "").strip()
+    if not uid or not org_id:
+        return None
+    conn = _get_conn()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role FROM org_members WHERE clerk_user_id = %s AND org_id = %s::uuid "
+            "AND tenant_id IS NULL",
+            (uid, org_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        return row[0] if row else None
+    except Exception as e:
+        _log.warning("db_org_member_role_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        return None
+
+
+def db_org_members(org_id: str) -> List[dict]:
+    """Whole-group members of an org, strongest role first.
+
+    tenant_id IS NULL only: a manager invited to a single store is an org_members row
+    too, and listing them here would imply oversight of the group they do not have.
+    """
+    if not org_id:
+        return []
+    conn = _get_conn()
+    if not conn:
+        raise DatabaseUnavailable("no connection for db_org_members")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT clerk_user_id, role, created_at FROM org_members "
+            "WHERE org_id = %s::uuid AND tenant_id IS NULL",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        out = [
+            {
+                "clerk_user_id": r[0],
+                "role": r[1],
+                "created_at": r[2].isoformat() if r[2] else None,
+            }
+            for r in rows
+        ]
+        out.sort(key=lambda m: (-org_role_rank(m["role"]), m.get("created_at") or ""))
+        return out
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        _log.error("db_org_members_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        raise DatabaseUnavailable(f"could not list org members: {type(e).__name__}") from e
+
+
+def db_org_owner_count(org_id: str) -> int:
+    """How many whole-group owners the org has. Guards the last-owner rule."""
+    if not org_id:
+        return 0
+    conn = _get_conn()
+    if not conn:
+        raise DatabaseUnavailable("no connection for db_org_owner_count")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM org_members WHERE org_id = %s::uuid AND role = 'owner' "
+            "AND tenant_id IS NULL",
+            (org_id,),
+        )
+        n = cur.fetchone()[0]
+        cur.close()
+        return int(n or 0)
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        # Raise rather than return 0: a 0 here would read as "no owners left to
+        # protect" and let the last one be removed on a transient error.
+        _log.error("db_org_owner_count_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        raise DatabaseUnavailable(f"could not count org owners: {type(e).__name__}") from e
 
 
 def db_org_member_remove(clerk_user_id: str, org_id: str) -> bool:

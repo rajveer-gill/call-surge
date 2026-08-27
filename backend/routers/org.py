@@ -444,3 +444,206 @@ def invite_store_manager(
         "invite_sent": bool(link.get("invite_sent")),
         "user_added": bool(link.get("user_added")),
     }
+
+
+# ---------------------------------------------------------------------------
+# Group membership — who oversees the whole group, and at what level
+# ---------------------------------------------------------------------------
+# Until now only a Nuvatra admin could add someone at group level. A franchise with
+# a head office and two regional managers had to email us to change their own team,
+# which does not scale past the pilot.
+#
+# owner   — the head account. May do anything here, including changing owners.
+# manager — may run the group and manage viewers and other managers, but may not
+#           remove an owner, demote an owner, or create one. That last restriction
+#           was not in the original ask: without it a manager can mint an owner they
+#           control and then outrank everyone, which makes "cannot remove the owner"
+#           decorative.
+# viewer  — read-only, including here.
+#
+# The last owner can never be removed or demoted, by anyone, including themselves.
+# Otherwise a group locks itself out of its own account and only we can fix it.
+
+
+class OrgMemberInvite(BaseModel):
+    email: EmailStr
+    role: str = Field(default="manager")
+    org_id: Optional[str] = None
+
+
+class OrgMemberRoleUpdate(BaseModel):
+    role: str
+    org_id: Optional[str] = None
+
+
+def _resolve_org_for_user(user_id: str, org_id: Optional[str]) -> str:
+    """Which group this request is about, and proof the caller belongs to it.
+
+    Most customers oversee exactly one group, so org_id is optional and inferred.
+    Someone who oversees several must name one — guessing would be a way to act on
+    the wrong company's account.
+    """
+    memberships = database.db_org_memberships_org_wide(user_id)
+    if not memberships:
+        raise HTTPException(status_code=403, detail="You do not oversee a group.")
+    if org_id:
+        wanted = str(org_id).strip()
+        for m in memberships:
+            if str(m.get("org_id")) == wanted:
+                return wanted
+        raise HTTPException(status_code=403, detail="You do not oversee that group.")
+    if len(memberships) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail="You oversee more than one group — say which with org_id.",
+        )
+    return str(memberships[0]["org_id"])
+
+
+def _actor_role(user_id: str, org_id: str, minimum: str, request: Request) -> str:
+    role = database.db_org_member_role(user_id, org_id)
+    if not database.org_role_at_least(role, minimum):
+        deps.audit_log(
+            "user", "auth_failure", actor_id=user_id, resource_type="org",
+            resource_id=org_id,
+            details={"reason": "org_role_insufficient", "have": role, "need": minimum},
+            request=request,
+        )
+        raise HTTPException(status_code=403, detail="This needs " + minimum + " access to the group.")
+    return (role or "").strip().lower()
+
+
+def _guard_target(
+    actor_role: str,
+    target_role: Optional[str],
+    org_id: str,
+    granting: Optional[str] = None,
+) -> None:
+    """Refuse changes that would escalate the actor or orphan the group."""
+    target = (target_role or "").strip().lower()
+    if actor_role != "owner":
+        if target == "owner":
+            raise HTTPException(status_code=403, detail="Only an owner can change an owner.")
+        if granting == "owner":
+            raise HTTPException(status_code=403, detail="Only an owner can make someone an owner.")
+    if target == "owner" and granting != "owner":
+        # Removing an owner, or demoting one. Fine unless they are the last.
+        if database.db_org_owner_count(org_id) <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="This is the only owner of the group. Make someone else an owner first.",
+            )
+
+
+@router.get("/api/org/members")
+def list_org_members(
+    user_id: str = Depends(deps.require_user),
+    org_id: Optional[str] = Query(None),
+):
+    """Everyone who oversees the group, plus invites not yet accepted."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    oid = _resolve_org_for_user(user_id, org_id)
+    me = database.db_org_member_role(user_id, oid)
+    return {
+        "org_id": oid,
+        "your_role": me,
+        "members": database.db_org_members(oid),
+        "pending_invites": database.db_org_invites_for_org(oid),
+        # So the UI can hide controls that would only earn a 403.
+        "can_manage": database.org_role_at_least(me, "manager"),
+        "can_manage_owners": database.org_role_at_least(me, "owner"),
+    }
+
+
+@router.post("/api/org/members")
+def invite_org_member(
+    req: OrgMemberInvite, request: Request, user_id: str = Depends(deps.require_user)
+):
+    """Invite someone to oversee the whole group."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    oid = _resolve_org_for_user(user_id, req.org_id)
+    actor = _actor_role(user_id, oid, "manager", request)
+    role = (req.role or "manager").strip().lower()
+    if role not in database.ORG_ROLES:
+        raise HTTPException(status_code=400, detail="Unknown role.")
+    _guard_target(actor, None, oid, granting=role)
+    link = clerk_service._clerk_invite_email_to_org(str(req.email), oid, role)
+    deps.audit_log(
+        "user", "org_member_invited", actor_id=user_id, resource_type="org",
+        resource_id=oid,
+        details={"email": str(req.email), "role": role, "by_role": actor,
+                 "user_added": bool(link.get("user_added")),
+                 "invite_sent": bool(link.get("invite_sent"))},
+        request=request,
+    )
+    if link.get("clerk_error") and not link.get("invite_sent") \
+            and not link.get("user_added") and not link.get("pending_invite_stored"):
+        raise HTTPException(status_code=502, detail=str(link.get("clerk_error")))
+    return {
+        "ok": True,
+        "added": bool(link.get("user_added")),
+        "invite_sent": bool(link.get("invite_sent")),
+        "pending": bool(link.get("pending_invite_stored")) and not link.get("user_added"),
+        "role": role,
+        "org_id": oid,
+    }
+
+
+@router.patch("/api/org/members/{clerk_user_id}")
+def update_org_member_role(
+    clerk_user_id: str,
+    req: OrgMemberRoleUpdate,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+):
+    """Change what someone may do in the group."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    oid = _resolve_org_for_user(user_id, req.org_id)
+    actor = _actor_role(user_id, oid, "manager", request)
+    role = (req.role or "").strip().lower()
+    if role not in database.ORG_ROLES:
+        raise HTTPException(status_code=400, detail="Unknown role.")
+    target_role = database.db_org_member_role(clerk_user_id, oid)
+    if target_role is None:
+        raise HTTPException(status_code=404, detail="That person does not oversee this group.")
+    _guard_target(actor, target_role, oid, granting=role)
+    if not database.db_org_member_add(clerk_user_id, oid, role):
+        raise HTTPException(status_code=500, detail="Could not change that role.")
+    deps.audit_log(
+        "user", "org_member_role_changed", actor_id=user_id, resource_type="org",
+        resource_id=oid,
+        details={"clerk_user_id": clerk_user_id, "from": target_role, "to": role,
+                 "by_role": actor},
+        request=request,
+    )
+    return {"ok": True, "clerk_user_id": clerk_user_id, "role": role, "org_id": oid}
+
+
+@router.delete("/api/org/members/{clerk_user_id}")
+def remove_org_member(
+    clerk_user_id: str,
+    request: Request,
+    user_id: str = Depends(deps.require_user),
+    org_id: Optional[str] = Query(None),
+):
+    """Revoke someone's oversight of the group."""
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    oid = _resolve_org_for_user(user_id, org_id)
+    actor = _actor_role(user_id, oid, "manager", request)
+    target_role = database.db_org_member_role(clerk_user_id, oid)
+    if target_role is None:
+        raise HTTPException(status_code=404, detail="That person does not oversee this group.")
+    _guard_target(actor, target_role, oid)
+    ok = database.db_org_member_remove(clerk_user_id, oid)
+    deps.audit_log(
+        "user", "org_member_removed", actor_id=user_id, resource_type="org",
+        resource_id=oid,
+        details={"clerk_user_id": clerk_user_id, "was": target_role, "by_role": actor,
+                 "ok": ok},
+        request=request,
+    )
+    return {"ok": ok, "clerk_user_id": clerk_user_id, "org_id": oid}
