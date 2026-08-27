@@ -244,6 +244,11 @@ def _config_data_to_business_info(data: dict) -> dict:
         "reservation_rules": _normalize_rule_entries(data.get("reservation_rules", [])),
         "staff": data.get("staff", []),
         "transfer_targets": data.get("transfer_targets", []),
+        # Absent means "quote prices", which is how every tenant behaved before this
+        # existed. Carried explicitly because this mapping is key-by-key: a setting
+        # the PATCH writes but this does not read is stored and never applied, which
+        # is exactly what happened the first time.
+        "quote_prices": data.get("quote_prices", True),
         "locations": data.get("locations", []),
         "greeting": data.get("greeting", ""),
         "plan": data.get("plan", "starter"),

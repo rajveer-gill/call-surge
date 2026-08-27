@@ -86,3 +86,33 @@ def test_default_is_unchanged_for_everyone_else():
 def test_toggle_reads_falsey_values_as_off():
     assert config_service.quotes_prices({"quote_prices": False}) is False
     assert config_service.quotes_prices({"quote_prices": 0}) is False
+
+
+# --- the wiring, not just the leaf -------------------------------------------
+
+def test_setting_survives_the_config_round_trip():
+    """The first version of this feature was inert.
+
+    Every test above builds a business_info dict by hand and hands it straight to
+    the prompt, which proves the prompt logic and nothing about how the value gets
+    there. _config_data_to_business_info is an explicit key-by-key mapping, and
+    quote_prices was missing from it — so the PATCH stored the setting, the read
+    dropped it, and the prompt always saw the default. The checkbox appeared not to
+    save; in fact nothing downstream of it worked either.
+
+    This goes through the real mapping, which is where that gap was.
+    """
+    stored = {"business_name": "Gill Salons", "services": CATALOG, "quote_prices": False}
+    info = config_service._config_data_to_business_info(stored)
+    assert info["quote_prices"] is False
+
+    prompt = build_system_prompt(business_info=info)
+    assert not MONEY.search(prompt), [l for l in prompt.split("\n") if MONEY.search(l)]
+    assert "does not quote prices" in prompt.lower()
+
+
+def test_round_trip_defaults_to_quoting_when_never_set():
+    stored = {"business_name": "Gill Salons", "services": CATALOG}
+    info = config_service._config_data_to_business_info(stored)
+    assert info["quote_prices"] is True
+    assert MONEY.search(build_system_prompt(business_info=info))
