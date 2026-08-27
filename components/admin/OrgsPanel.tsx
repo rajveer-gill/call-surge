@@ -378,18 +378,32 @@ export function OrgCard({
         const typed = window.prompt(
           `${detail}
 
-Type CANCEL to cancel that subscription and delete the group.
+Type CANCEL to cancel the subscription and delete the group.
 ` +
-            `Type FORCE to delete the group anyway and leave the subscription billing.`,
+            `Type EVERYTHING to also DELETE its stores — call history, appointments and ` +
+            `phone numbers go too, and this cannot be undone.
+` +
+            `Type FORCE to delete only the group and leave the subscription billing.`,
           ''
         )
         const choice = (typed || '').trim().toUpperCase()
+        if (choice === 'EVERYTHING') {
+          // Detaching leaves live stores with a phone number, no owner and no
+          // billing. "Delete the group" reasonably means its locations go too — but
+          // that destroys real call history, so it is its own word, not a default.
+          await api.delete(
+            `/api/admin/orgs/${org.id}?force=true&cancel_subscription=true&delete_stores=true`,
+            adminApi
+          )
+          onSuccess(`Deleted group "${org.name}", its stores, and cancelled its subscription.`)
+          return
+        }
         if (choice === 'CANCEL') {
           await api.delete(
             `/api/admin/orgs/${org.id}?force=true&cancel_subscription=true`,
             adminApi
           )
-          onSuccess(`Cancelled the subscription and deleted group "${org.name}".`)
+          onSuccess(`Cancelled the subscription and deleted group "${org.name}". Its stores are now independent.`)
           return
         }
         if (choice === 'FORCE') {

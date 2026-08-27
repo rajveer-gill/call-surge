@@ -608,6 +608,7 @@ def admin_delete_org(
     request: Request,
     force: bool = False,
     cancel_subscription: bool = False,
+    delete_stores: bool = False,
     admin: str = Depends(deps.require_admin),
 ):
     """Delete a group. Members and pending invites go with it; stores do NOT.
@@ -631,7 +632,7 @@ def admin_delete_org(
         raise HTTPException(status_code=404, detail="Org not found")
     store_count = database.db_org_store_count(org_id)
     sub_id = (org.get("stripe_subscription_id") or "").strip()
-    if not force:
+    if not force and not delete_stores:
         if store_count:
             raise HTTPException(
                 status_code=409,
@@ -669,6 +670,23 @@ def admin_delete_org(
                     + str(cancelled.get("error") or "unknown error")
                 ),
             )
+    deleted_stores: List[str] = []
+    if delete_stores and store_count:
+        # Reuse the tenant-delete route rather than writing a second deletion. It
+        # releases the Twilio number, archives the operational data, cascades
+        # tenant_members, and clears each member's Clerk metadata and sessions —
+        # which is what makes a later sign-in behave like a new account rather than
+        # dropping someone back into a store that no longer has a group.
+        #
+        # Detaching alone leaves live stores with a phone number, no owner and no
+        # billing. "Delete the group" should not quietly mean "keep its locations".
+        for st in database.db_org_stores(org_id) or []:
+            tid = str(st.get("id") or "")
+            if not tid:
+                continue
+            admin_delete_tenant(tenant_id=tid, request=request, admin_user_id=admin)
+            deleted_stores.append(st.get("client_id") or tid)
+
     ok = database.db_org_delete(org_id)
     deps.audit_log(
         "admin",
@@ -678,6 +696,7 @@ def admin_delete_org(
         resource_id=org_id,
         details={
             "cancelled_subscription": (cancelled or {}).get("subscription_id"),
+            "deleted_stores": deleted_stores,
             "name": org.get("name"),
             "stores_detached": store_count,
             "had_subscription": bool(sub_id),

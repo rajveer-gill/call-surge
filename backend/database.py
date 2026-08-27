@@ -1532,6 +1532,32 @@ def db_org_update_subscription(
         return False
 
 
+def db_org_stores(org_id: str) -> List[dict]:
+    """Every store attached to a group: [{id, client_id, name}].
+
+    Used when deleting a group that should take its locations with it.
+    """
+    if not org_id:
+        return []
+    conn = _get_conn()
+    if not conn:
+        raise DatabaseUnavailable("no connection for db_org_stores")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, client_id, name FROM tenants WHERE org_id = %s::uuid ORDER BY created_at",
+            (org_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [{"id": str(r[0]), "client_id": r[1], "name": r[2]} for r in rows]
+    except DatabaseUnavailable:
+        raise
+    except Exception as e:
+        _log.error("db_org_stores_failed org=%s err=%s: %s", org_id, type(e).__name__, e)
+        raise DatabaseUnavailable(f"could not list org stores: {type(e).__name__}") from e
+
+
 def db_org_sync_store_plans(org_id: str, plan: str) -> int:
     """Stamp the org's plan onto every store in it.
 
