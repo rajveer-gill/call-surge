@@ -235,18 +235,38 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
                   <button
                     type="button"
                     disabled={busy === p.email}
-                    onClick={() =>
-                      void run(
-                        p.email,
-                        () =>
-                          api.delete(
+                    onClick={() => {
+                      // Say whether the emailed link is actually dead. If Clerk
+                      // could not be reached it may still work, and "cancelled" on
+                      // its own would imply otherwise.
+                      setBusy(p.email)
+                      setError(null)
+                      setNotice(null)
+                      void (async () => {
+                        try {
+                          const { data } = await api.delete<{
+                            link_revoked?: boolean
+                            clerk_error?: string | null
+                          }>(
                             `/api/org/invites?email=${encodeURIComponent(p.email)}${
                               orgId ? `&org_id=${encodeURIComponent(orgId)}` : ''
                             }`
-                          ),
-                        `Invitation to ${p.email} cancelled.`
-                      )
-                    }
+                          )
+                          setNotice(
+                            data.link_revoked
+                              ? `Invitation to ${p.email} cancelled, and the emailed link no longer works.`
+                              : `Invitation to ${p.email} cancelled here, but the emailed link may still work${
+                                  data.clerk_error ? ` (${data.clerk_error})` : ''
+                                }. Re-invite to replace it.`
+                          )
+                          await load()
+                        } catch (e) {
+                          setError(detailOf(e) || 'That did not work.')
+                        } finally {
+                          setBusy(null)
+                        }
+                      })()
+                    }}
                     className="rounded-lg px-2 py-0.5 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
                   >
                     Cancel

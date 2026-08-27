@@ -242,6 +242,67 @@ def _clerk_relink_user_to_tenant(
     return displaced
 
 
+def _clerk_revoke_invitations_for_email(email: str, headers: dict) -> dict:
+    """Revoke any PENDING Clerk invitation for this address.
+
+    Cancelling used to delete only our own pending row, leaving Clerk's invitation
+    alive. Two consequences, both silent: the old email kept working as a way in
+    after access was withdrawn, and re-inviting the same address hit Clerk's
+    duplicate check so no new mail was ever sent.
+
+    Best-effort by design — the caller has already withdrawn access on our side, and
+    failing the whole request because Clerk was unreachable would leave the user
+    unable to cancel at all.
+    """
+    import httpx
+
+    out = {"revoked": 0, "error": None}
+    target = (email or "").strip().lower()
+    if not target:
+        return out
+    try:
+        resp = httpx.get(
+            "https://api.clerk.com/v1/invitations",
+            headers=headers,
+            params={"status": "pending", "limit": 100},
+            timeout=10.0,
+        )
+        if resp.status_code >= 400:
+            out["error"] = f"list {resp.status_code}"
+            return out
+        rows = resp.json()
+        if isinstance(rows, dict):
+            rows = rows.get("data") or []
+        for row in rows or []:
+            if str(row.get("email_address", "")).strip().lower() != target:
+                continue
+            inv_id = row.get("id")
+            if not inv_id:
+                continue
+            r = httpx.post(
+                f"https://api.clerk.com/v1/invitations/{inv_id}/revoke",
+                headers=headers,
+                timeout=10.0,
+            )
+            if r.status_code < 400:
+                out["revoked"] += 1
+            else:
+                out["error"] = f"revoke {r.status_code}"
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+def revoke_clerk_invitations(email: str) -> dict:
+    """Public wrapper: revoke pending Clerk invitations for an address."""
+    secret = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not secret:
+        return {"revoked": 0, "error": "CLERK_SECRET_KEY is not set"}
+    return _clerk_revoke_invitations_for_email(
+        email, {"Authorization": f"Bearer {secret}", "Content-Type": "application/json"}
+    )
+
+
 def _clerk_invite_email_to_org(
     email: str, org_id: str, role: str = "viewer", tenant_id: Optional[str] = None
 ) -> dict:
@@ -348,8 +409,29 @@ def _clerk_invite_email_to_org(
                         "clerk_error": None,
                         "clerk_user_id": retry[0],
                     }
-            clerk_error = _clerk_invite_error_message(resp.status_code, body)
-            print(f"[Admin] Clerk org invite failed: {resp.status_code} {body[:200]}")
+            elif "duplicate_record" in body or "already" in body.lower():
+                # A pending invitation from a previous send blocks a new one, so a
+                # cancelled address could never be re-invited. Clear it and retry.
+                rev = _clerk_revoke_invitations_for_email(email, headers)
+                if rev.get("revoked"):
+                    again = httpx.post(
+                        "https://api.clerk.com/v1/invitations",
+                        headers=headers,
+                        json={
+                            "email_address": email,
+                            "public_metadata": {"org_id": org_id, "org_role": role},
+                            "redirect_url": os.getenv("FRONTEND_URL", "https://call-surge.com")
+                            + "/sign-up?invited=1&next="
+                            + ("%2Fdashboard" if tenant_id else "%2Fdashboard%2Fstores"),
+                        },
+                        timeout=10.0,
+                    )
+                    if again.status_code < 400:
+                        invite_sent = True
+                        body = ""
+            if not invite_sent:
+                clerk_error = _clerk_invite_error_message(resp.status_code, body)
+                print(f"[Admin] Clerk org invite failed: {resp.status_code} {body[:200]}")
     except Exception as e:
         clerk_error = str(e)[:240]
         print(f"[Admin] Clerk org invite error: {e}")

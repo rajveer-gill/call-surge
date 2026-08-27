@@ -744,11 +744,26 @@ def revoke_org_invite(
     oid = _resolve_org_for_user(user_id, org_id)
     actor = _actor_role(user_id, oid, "manager", request)
     ok = database.db_org_invite_delete(email, oid)
+    # Also kill the invitation on Clerk's side. Deleting only our row left the
+    # emailed link working as a way in after access was withdrawn, and made the
+    # address un-invitable afterwards because Clerk still held a pending invite.
+    revoked = clerk_service.revoke_clerk_invitations(email)
     deps.audit_log(
         "user", "org_invite_revoked", actor_id=user_id, resource_type="org",
-        resource_id=oid, details={"email": email, "by_role": actor, "ok": ok},
+        resource_id=oid,
+        details={"email": email, "by_role": actor, "ok": ok,
+                 "clerk_revoked": revoked.get("revoked"),
+                 "clerk_error": revoked.get("error")},
         request=request,
     )
     if not ok:
         raise HTTPException(status_code=404, detail="No pending invite for that address.")
-    return {"ok": True, "email": email, "org_id": oid}
+    return {
+        "ok": True,
+        "email": email,
+        "org_id": oid,
+        # Surfaced so the UI can say the emailed link may still work rather than
+        # implying the invitation is definitively dead.
+        "link_revoked": bool(revoked.get("revoked")) and not revoked.get("error"),
+        "clerk_error": revoked.get("error"),
+    }

@@ -329,3 +329,43 @@ def test_manager_can_revoke(monkeypatch):
     monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
     out = org.revoke_org_invite(_Req(), email="x@example.net", user_id="u1", org_id=None)
     assert out["ok"] is True
+
+
+# --- cancelling must actually cancel ----------------------------------------
+
+def test_cancel_revokes_the_clerk_invitation_too(monkeypatch):
+    """Deleting our row alone left the emailed link working as a way in after
+    access was withdrawn, and made the address un-invitable because Clerk still
+    held a pending invite."""
+    import clerk_service
+
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "manager")
+    monkeypatch.setattr(database, "db_org_invite_delete", lambda _e, _o: True)
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    seen = {}
+    monkeypatch.setattr(clerk_service, "revoke_clerk_invitations",
+                        lambda e: seen.update(email=e) or {"revoked": 1, "error": None})
+    out = org.revoke_org_invite(_Req(), email="x@example.net", user_id="u1", org_id=None)
+    assert seen == {"email": "x@example.net"}
+    assert out["link_revoked"] is True
+
+
+def test_cancel_reports_when_the_link_could_not_be_killed(monkeypatch):
+    """If Clerk was unreachable the emailed link may still work. Say so rather than
+    implying the invitation is dead."""
+    import clerk_service
+
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "manager")
+    monkeypatch.setattr(database, "db_org_invite_delete", lambda _e, _o: True)
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(clerk_service, "revoke_clerk_invitations",
+                        lambda _e: {"revoked": 0, "error": "list 500"})
+    out = org.revoke_org_invite(_Req(), email="x@example.net", user_id="u1", org_id=None)
+    # Access is withdrawn on our side regardless — that must not fail on Clerk.
+    assert out["ok"] is True
+    assert out["link_revoked"] is False
+    assert out["clerk_error"] == "list 500"
