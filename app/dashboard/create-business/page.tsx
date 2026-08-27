@@ -142,6 +142,15 @@ export default function CreateBusinessPage() {
       api.get('/api/org/me').catch(() => null),
     ])
       .then(([r, orgRes]) => {
+        // Logged unconditionally. A page that silently keeps someone leaves nothing
+        // behind to look at afterwards, and "why am I on this screen" is not
+        // reproducible once they navigate away.
+        console.info('[route-decision] create-business', {
+          can_use_app: r?.data?.can_use_app ?? null,
+          demo_mode: r?.data?.demo_mode ?? null,
+          is_org_member: orgRes?.data?.is_org_member ?? null,
+          org_lookup: orgRes ? 'ok' : 'failed',
+        })
         if (r?.data?.can_use_app && !r?.data?.demo_mode) {
           router.replace('/dashboard')
           return

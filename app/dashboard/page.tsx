@@ -83,6 +83,7 @@ export default function DashboardPage() {
   // Multi-store oversight: set only for a franchise/regional account. A normal store
   // owner gets is_org_member=false and sees none of this.
   const [org, setOrg] = useState<{ is_org_member: boolean; can_edit_any?: boolean } | null>(null)
+  const [orgChecked, setOrgChecked] = useState(false)
   // Set when an admin is looking at a customer's store through the admin console.
   // Without it they'd have no visible way back — the bar below is org-member only.
   const [viewingAsAdmin, setViewingAsAdmin] = useState(false)
@@ -140,7 +141,16 @@ export default function DashboardPage() {
     api
       .get<{ is_org_member: boolean; can_edit_any?: boolean }>('/api/org/me')
       .then((r) => setOrg(r.data))
-      .catch(() => setOrg(null))
+      .catch((e) => {
+        console.info('[route-decision] org lookup failed', {
+          status: (e as { response?: { status?: number } })?.response?.status ?? null,
+        })
+        setOrg(null)
+      })
+      // Separate from `org` because null means BOTH "still loading" and "lookup
+      // failed". Redirects wait on this instead, so a failed lookup falls through
+      // to the normal path rather than leaving someone on a page that never moves.
+      .finally(() => setOrgChecked(true))
   }, [api])
 
   const backToAllStores = useCallback(() => {
@@ -154,6 +164,11 @@ export default function DashboardPage() {
   // page — send them to the store list instead of a "no tenant" dead end.
   useEffect(() => {
     if (access === 'denied' && deniedKind === 'no_membership' && org?.is_org_member && !viewingStore) {
+      console.info('[route-decision] dashboard -> stores (group member)', {
+        access,
+        deniedKind,
+        can_edit_any: org?.can_edit_any ?? null,
+      })
       router.replace('/dashboard/stores')
     }
   }, [access, deniedKind, org, viewingStore, router])
@@ -266,11 +281,24 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (access !== 'denied' || deniedKind !== 'no_membership') return
+    // WAIT for org membership to load before deciding. This raced: `access` resolves
+    // before /api/org/me does, so an invited group member — who has no business of
+    // their own and never will — was thrown to "create a business" before anyone
+    // knew they belonged to a group. The effect below sends them to their stores,
+    // but only if it gets to run first, which it usually did not.
+    //
+    if (!orgChecked) return
+    if (org?.is_org_member) return
     // Self-serve is the primary path: a signed-in non-admin without a business goes to
     // setup, not the invite-only "No Access" wall. (Admins were redirected to /admin
     // earlier; the create-business page handles users who do have a business.)
+    console.info('[route-decision] dashboard -> create-business', {
+      access,
+      deniedKind,
+      is_org_member: org?.is_org_member ?? null,
+    })
     router.replace('/dashboard/create-business')
-  }, [access, deniedKind, router])
+  }, [access, deniedKind, org, orgChecked, router])
 
   useEffect(() => {
     if (access !== 'granted' && access !== 'subscription_required') return
