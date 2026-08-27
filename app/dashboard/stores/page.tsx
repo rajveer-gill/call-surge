@@ -326,17 +326,18 @@ export default function StoresPage() {
           {/* Group-level, so it belongs on the group page rather than in a single
               store's settings. Only shown to someone who oversees a whole group —
               a store-only manager has no group to run. */}
-          {/* One section per group, each naming its own org_id. Picking a group for
-              someone who oversees two would silently manage the wrong company —
-              which is the case the backend refuses to guess about. */}
-          {orgs.map((o) => (
-            <div className="mt-10" key={o.org_id}>
-              {orgs.length > 1 && (
-                <p className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">{o.name}</p>
-              )}
-              <OrgTeamSection api={api} orgId={o.org_id} />
+          {/* One Team panel, with a picker when the account oversees several groups.
+              A panel per group looked fine with one and became a wall of near
+              identical cards with three, two of which share a name. It still never
+              guesses: the chosen group is explicit in every request. */}
+          {orgs.length > 0 && (
+            <div className="mt-10">
+              <OrgTeamSection
+                api={api}
+                orgs={orgs.map((o) => ({ org_id: o.org_id, name: o.name }))}
+              />
             </div>
-          ))}
+          )}
 
           {sorted === null && (
             <div className="mt-10 flex justify-center">

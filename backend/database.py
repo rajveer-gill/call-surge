@@ -500,6 +500,42 @@ def init_db() -> bool:
             except Exception:
                 pass
         try:
+            # Every group needs an owner. This lives here, not only in Alembic,
+            # because schema in this project arrives through init_db's
+            # ADD COLUMN IF NOT EXISTS — Alembic is not run on deploy, so a
+            # migration that adds a column still lands while one that BACKFILLS
+            # DATA silently does nothing. 0014 shipped and no owner ever appeared.
+            #
+            # Idempotent and self-healing by construction: it only touches orgs that
+            # have no owner, and promotes the longest-standing whole-group manager —
+            # the same call we would make by hand. An org that already has an owner
+            # is never altered, so re-running on every boot is a no-op.
+            cur.execute(
+                """
+                WITH ownerless AS (
+                    SELECT o.id FROM orgs o
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM org_members m
+                        WHERE m.org_id = o.id AND m.role = 'owner' AND m.tenant_id IS NULL
+                    )
+                ), promote AS (
+                    SELECT DISTINCT ON (m.org_id) m.org_id, m.clerk_user_id
+                    FROM org_members m
+                    JOIN ownerless w ON w.id = m.org_id
+                    WHERE m.role = 'manager' AND m.tenant_id IS NULL
+                    ORDER BY m.org_id, m.created_at ASC, m.clerk_user_id ASC
+                )
+                UPDATE org_members t SET role = 'owner'
+                FROM promote p
+                WHERE t.org_id = p.org_id AND t.clerk_user_id = p.clerk_user_id
+                  AND t.tenant_id IS NULL
+                """
+            )
+            if cur.rowcount:
+                print(f"[DB] promoted {cur.rowcount} group(s) to have an owner", flush=True)
+        except Exception as e:
+            print(f"[DB] owner backfill skipped: {e}", flush=True)
+        try:
             # NULL org_id = an independent store (every tenant, until grouped).
             cur.execute(
                 "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS org_id UUID "

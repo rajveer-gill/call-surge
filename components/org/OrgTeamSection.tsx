@@ -42,7 +42,10 @@ function RoleBadge({ role }: { role: string }) {
   )
 }
 
-export function OrgTeamSection({ api, orgId }: { api: AxiosInstance; orgId?: string }) {
+type OrgChoice = { org_id: string; name: string }
+
+export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgChoice[] }) {
+  const [orgId, setOrgId] = useState(orgs[0]?.org_id)
   const [data, setData] = useState<MembersResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -104,10 +107,27 @@ export function OrgTeamSection({ api, orgId }: { api: AxiosInstance; orgId?: str
         <Users className="h-5 w-5 text-cyan-300" aria-hidden />
         <h2 className="font-display text-lg font-semibold text-white">Team</h2>
       </div>
-      <p className="mb-5 text-sm text-zinc-500">
+      <p className="mb-4 text-sm text-zinc-500">
         Who can see and run this group. Store-level managers are invited from each
         store instead.
       </p>
+
+      {orgs.length > 1 && (
+        <label className="mb-5 block">
+          <span className="mb-1 block text-[11px] uppercase tracking-wide text-zinc-500">Group</span>
+          <select
+            value={orgId}
+            onChange={(e) => setOrgId(e.target.value)}
+            className="w-full max-w-sm rounded-lg border border-white/15 bg-zinc-950 px-3 py-2 text-sm text-zinc-100"
+          >
+            {orgs.map((o) => (
+              <option key={o.org_id} value={o.org_id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {error && (
         <p className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
