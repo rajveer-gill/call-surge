@@ -231,6 +231,27 @@ export function OrgTeamSection({ api, orgs }: { api: AxiosInstance; orgs: OrgCho
               <li key={p.email} className="flex items-center gap-2 text-sm text-zinc-400">
                 <span className="truncate">{p.email}</span>
                 {p.role && <RoleBadge role={p.role} />}
+                {canManage && (
+                  <button
+                    type="button"
+                    disabled={busy === p.email}
+                    onClick={() =>
+                      void run(
+                        p.email,
+                        () =>
+                          api.delete(
+                            `/api/org/invites?email=${encodeURIComponent(p.email)}${
+                              orgId ? `&org_id=${encodeURIComponent(orgId)}` : ''
+                            }`
+                          ),
+                        `Invitation to ${p.email} cancelled.`
+                      )
+                    }
+                    className="rounded-lg px-2 py-0.5 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                )}
               </li>
             ))}
           </ul>

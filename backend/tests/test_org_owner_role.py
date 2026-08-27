@@ -290,3 +290,42 @@ def test_store_scoped_invite_carries_the_store_destination(monkeypatch):
     assert "/sign-up" in url
     # A store manager has no rollup to land on.
     assert "%2Fdashboard" in url and "stores" not in url
+
+
+def test_viewer_cannot_revoke_an_invite(monkeypatch):
+    """Revoking is a membership change, so it needs the same floor as inviting.
+
+    org_id is passed explicitly: called outside FastAPI, a Query(None) default is a
+    Query object rather than None, which reads as "a group was named" and refuses
+    before reaching the role check this test is about.
+    """
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "viewer")
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as ei:
+        org.revoke_org_invite(_Req(), email="x@example.net", user_id="u1", org_id=None)
+    assert ei.value.status_code == 403
+
+
+def test_revoking_a_missing_invite_is_a_404_not_a_silent_ok(monkeypatch):
+    """Reporting success for an invite that was never cancelled would leave a
+    standing offer of access to every store in the group."""
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "manager")
+    monkeypatch.setattr(database, "db_org_invite_delete", lambda _e, _o: False)
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as ei:
+        org.revoke_org_invite(_Req(), email="ghost@example.net", user_id="u1", org_id=None)
+    assert ei.value.status_code == 404
+
+
+def test_manager_can_revoke(monkeypatch):
+    monkeypatch.setattr(org.runtime, "USE_DB", True, raising=False)
+    monkeypatch.setattr(database, "db_org_memberships_org_wide", lambda _u: [{"org_id": "o1"}])
+    monkeypatch.setattr(database, "db_org_member_role", lambda _u, _o: "manager")
+    monkeypatch.setattr(database, "db_org_invite_delete", lambda _e, _o: True)
+    monkeypatch.setattr(org.deps, "audit_log", lambda *a, **k: None)
+    out = org.revoke_org_invite(_Req(), email="x@example.net", user_id="u1", org_id=None)
+    assert out["ok"] is True

@@ -720,3 +720,35 @@ def transfer_org_ownership(
         request=request,
     )
     return {"ok": True, "org_id": oid, "owner": clerk_user_id, "you_are_now": "manager"}
+
+
+@router.delete("/api/org/invites")
+def revoke_org_invite(
+    request: Request,
+    email: str = Query(...),
+    user_id: str = Depends(deps.require_user),
+    org_id: Optional[str] = Query(None),
+):
+    """Cancel an invitation that has not been accepted yet.
+
+    Invite existed with no way to un-invite, which matters more than it sounds: a
+    pending invite is a standing offer of access to every store in the group, and
+    the only way to withdraw it was to ask us. It also blocks re-inviting the same
+    address after a bad send.
+
+    No owner guard needed — an invite can never carry the owner role, so revoking
+    one can never remove the group's owner.
+    """
+    if not runtime.USE_DB:
+        raise HTTPException(status_code=503, detail="Database required")
+    oid = _resolve_org_for_user(user_id, org_id)
+    actor = _actor_role(user_id, oid, "manager", request)
+    ok = database.db_org_invite_delete(email, oid)
+    deps.audit_log(
+        "user", "org_invite_revoked", actor_id=user_id, resource_type="org",
+        resource_id=oid, details={"email": email, "by_role": actor, "ok": ok},
+        request=request,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="No pending invite for that address.")
+    return {"ok": True, "email": email, "org_id": oid}
