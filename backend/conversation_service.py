@@ -1149,45 +1149,87 @@ def _goodbye_line(info: Optional[dict] = None) -> str:
     )
 
 
+ANYTHING_ELSE_LINE = "Is there anything else I can help you with before I let you go?"
+
+
 def _close_call_after_booking(call_data: dict, ai_text: str) -> str:
-    """Say goodbye and mark the call for hangup once the request is taken."""
+    """Wind the call up once the request is taken — over two turns, not one.
+
+    Hanging up the instant the confirmation is spoken also takes away the moment a
+    caller says "oh — can you add a highlight to that", which is the other half of
+    Lana's feedback. So the confirmation ends by offering one last thing, and whatever
+    they say next is answered and then the call ends. One extra turn, and the call
+    still cannot run on: the goodbye after that turn is unconditional.
+    """
     if not _end_call_after_booking_enabled():
         return ai_text
-    call_data["end_call_after_reply"] = True
     text = (ai_text or "").strip()
-    goodbye = _goodbye_line()
-    return f"{text} {goodbye}".strip() if text else goodbye
+    if call_data.get("post_booking_grace_offered"):
+        call_data.pop("post_booking_grace_offered", None)
+        call_data["end_call_after_reply"] = True
+        goodbye = _goodbye_line()
+        return f"{text} {goodbye}".strip() if text else goodbye
+    call_data["post_booking_grace_offered"] = True
+    return f"{text} {ANYTHING_ELSE_LINE}".strip() if text else ANYTHING_ELSE_LINE
 
 
 def _booking_identity(booking: dict) -> tuple:
-    """What makes two BOOKING lines the same request rather than a change of mind."""
+    """What makes two BOOKING lines the same request rather than a change of mind.
+
+    Canonical, not literal. The identity is stored from a booking dict the validator and
+    the create path have already rewritten — reason to the menu spelling, staff to the
+    roster spelling — while the next turn's line arrives raw. Comparing one against the
+    other, "Terence"/"Haircut and all over color" never matched the "Terrance"/"Haircut +
+    All Over Color" it had just been turned into, so an identical re-emit read as an
+    amendment and superseded the request it was a copy of.
+    """
     def norm(v):
         return re.sub(r"\s+", " ", str(v or "").strip()).lower()
 
+    reason_raw = (booking.get("reason") or "").strip()
+    try:
+        services, _ = booking_service.normalize_service_choices_for_booking(reason_raw)
+        reason_key = norm(booking_service.format_service_choices(services)) or norm(reason_raw)
+    except Exception:
+        reason_key = norm(reason_raw)
+    staff_raw = (booking.get("staff") or "").strip()
+    try:
+        staff_key = resolve_staff_id_from_booking_fragment(staff_raw) or norm(staff_raw)
+    except Exception:
+        staff_key = norm(staff_raw)
     return (
         norm(booking.get("date")),
         booking_service._normalize_time_to_hhmm(booking.get("time") or "")
         or norm(booking.get("time")),
-        norm(booking.get("reason")),
+        reason_key,
         norm(booking.get("name")),
-        norm(booking.get("staff")),
+        staff_key,
     )
 
 
 def _strip_booking_directive_for_voice(ai_text: str) -> str:
-    """Remove BOOKING:... from model output so it is never read aloud by TTS."""
+    """Remove BOOKING:... from model output so it is never read aloud by TTS.
+
+    Returns "" when the directive WAS the whole reply — every caller substitutes its own
+    wording for an empty result. Falling back to the raw text here, which is what it used
+    to do, meant a reply consisting only of the marker was read down the phone: "BOOKING
+    colon Lana pipe pipe pipe two thousand twenty six dash…". It stayed hidden while the
+    booking path always replaced the reply with a confirmation, and surfaces the moment a
+    line is parsed and then dropped — a repeat, or a change the caller never asked for.
+    """
     if not ai_text or "BOOKING:" not in ai_text.upper():
         return (ai_text or "").strip()
-    cleaned = re.sub(r"(?is)\s*BOOKING:\s*[^\n]+", "", ai_text).strip()
-    return cleaned if cleaned else (ai_text or "").strip()
+    return re.sub(r"(?is)\s*BOOKING:\s*[^\n]+", "", ai_text).strip()
 
 
 def _strip_message_directive_for_voice(ai_text: str) -> str:
-    """Remove a MESSAGE:... directive line so it is never read aloud by TTS."""
+    """Remove a MESSAGE:... directive line so it is never read aloud by TTS.
+
+    Empty when the directive was the whole reply — see the BOOKING version above.
+    """
     if not ai_text or "MESSAGE:" not in ai_text.upper():
         return (ai_text or "").strip()
-    cleaned = re.sub(r"(?is)\s*MESSAGE:\s*[^\n]+", "", ai_text).strip()
-    return cleaned if cleaned else (ai_text or "").strip()
+    return re.sub(r"(?is)\s*MESSAGE:\s*[^\n]+", "", ai_text).strip()
 
 
 def _store_caller_message(call_data: dict, body: str) -> bool:
@@ -2068,6 +2110,42 @@ def _utterance_requests_change(text: str) -> bool:
     return any(cue in t for cue in _CHANGE_INTENT_CUES)
 
 
+_DAY_WORD_RE = re.compile(
+    r"\b(mon|tues|wednes|thurs|fri|satur|sun)day\b|\btomorrow\b|\btoday\b|\bnext week\b", re.I
+)
+
+
+def _caller_asked_for_a_change(text: str, info: Optional[dict] = None) -> bool:
+    """Did the caller actually ask to change something, or is the model repeating itself?
+
+    Once a request exists, the model re-emits BOOKING lines freely — on Lana's call it
+    did so on the goodbye turn, against "Okay, thanks!", sometimes with a time it had
+    invented. An unchanged repeat is caught by the identity check; a CHANGED one used to
+    go straight through and rewrite the request the caller had just been read back.
+
+    So a change is only taken from a turn where the caller said something that could be
+    one: a pivot word, an added service, a number, a day, a stylist, or a service name.
+    Deliberately generous — a real correction should never be dropped — but "Okay,
+    thanks!" contains none of them.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _utterance_requests_change(t):
+        return True
+    from sms_appointment_updates import text_requests_additional_service
+
+    if text_requests_additional_service(t):
+        return True
+    if re.search(r"\d", t) or _DAY_WORD_RE.search(t):
+        return True
+    biz = info or config_service.get_business_info()
+    if _staff_id_from_spoken_text(t, biz):
+        return True
+    names, _ = booking_service.normalize_service_choices_for_booking(t, biz)
+    return bool(names)
+
+
 def _apply_voice_detail_change_if_pending(
     call_data: dict, call_sid: Optional[str], outcome_out: Optional[dict] = None
 ) -> Optional[str]:
@@ -2253,6 +2331,10 @@ async def generate_response_async(
             from_number=call_data.get("from_number") or None,
             client_id=call_data.get("client_id") or None,
         )
+        # Read before anything on this turn can set it: it means the PREVIOUS reply
+        # closed the booking and asked if there was anything else, so this turn is the
+        # last one. See the close at the bottom of this function.
+        grace_offered_before_turn = bool(call_data.get("post_booking_grace_offered"))
         # Diagnostic (only emitted when OBS_TRACE_TRANSCRIPT=1): the exact date + per-stylist
         # schedule the AI is reasoning over, so a wrong "tomorrow" or a misattributed stylist
         # schedule is visible in the logs instead of inferred.
@@ -2413,6 +2495,23 @@ async def generate_response_async(
         if booking and _booking_identity(booking) == call_data.get("last_booking_identity"):
             system_info(
                 "voice_booking_repeat_ignored",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+            )
+            booking = None
+        elif (
+            booking
+            and call_data.get("appointment_created")
+            and not _caller_asked_for_a_change(
+                latest_user_message(call_data.get("conversation_history"))
+            )
+        ):
+            # A DIFFERENT booking line on a turn where the caller asked for nothing. That
+            # is the model reworking a request that is already with the salon, not the
+            # caller changing their mind — and it would supersede the request they were
+            # just read back.
+            system_info(
+                "voice_booking_unrequested_change_ignored",
                 call_sid=call_sid,
                 client_id=str(call_data.get("client_id") or ""),
             )
@@ -2578,6 +2677,21 @@ async def generate_response_async(
         if call_data.pop("forward_unavailable", False):
             if not (config_service.get_business_info().get("forwarding_phone") or "").strip():
                 ai_text = _NO_TRANSFER_FALLBACK_TEXT
+
+        # The last turn: the previous reply took the request and asked whether there was
+        # anything else. Whatever that was, it has now been answered — say goodbye and end
+        # the call rather than looping back into another listen. Skipped when the caller
+        # has just been offered a callback, which is a question they still have to answer.
+        if (
+            grace_offered_before_turn
+            and not call_data.get("end_call_after_reply")
+            and ai_text != _NO_TRANSFER_FALLBACK_TEXT
+        ):
+            call_data.pop("post_booking_grace_offered", None)
+            if _end_call_after_booking_enabled():
+                call_data["end_call_after_reply"] = True
+                ai_text = f"{(ai_text or '').strip()} {_goodbye_line()}".strip()
+                voice_info("voice_call_closing_after_booking", call_sid=call_sid)
 
         if (ai_text or "") != _model_reply_raw:
             voice_transcript(

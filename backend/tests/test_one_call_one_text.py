@@ -169,6 +169,77 @@ def test_a_failed_send_does_not_spend_the_budget(monkeypatch):
     assert len(sent) == 2
 
 
+# --- the model repeating itself after the request is taken ---------------------
+#
+# Found by replaying Lana's calls through the pipeline: once a request exists the model
+# re-emits BOOKING lines on turns where the caller asked for nothing ("Okay, thanks!"),
+# sometimes with a time it invented. Both guards below stop that becoming another
+# appointment row and another text.
+
+
+def test_a_re_emitted_line_is_recognised_after_the_names_are_canonicalised(monkeypatch):
+    """The stored identity comes from a booking the validator has already rewritten to
+    the roster/menu spelling; the next turn's line arrives raw. Compared literally,
+    "Terence"/"Haircut and all over color" never matched the "Terrance"/"Haircut + All
+    Over Color" it had just been turned into, so a copy read as an amendment."""
+    biz = {
+        "services": [
+            {"id": "svc_cut", "name": "Haircut"},
+            {"id": "svc_color", "name": "All Over Color"},
+        ],
+        "staff": [{"id": "st_t", "name": "Terrance", "service_ids": []}],
+    }
+    monkeypatch.setattr(cs.config_service, "get_business_info", lambda: biz)
+    raw = {
+        "name": "Lana",
+        "date": "2026-09-03",
+        "time": "2 PM",
+        "reason": "Haircut and all over color",
+        "staff": "Terence",
+    }
+    canonical = {
+        "name": "Lana",
+        "date": "2026-09-03",
+        "time": "14:00",
+        "reason": "Haircut + All Over Color",
+        "staff": "Terrance",
+    }
+    assert cs._booking_identity(raw) == cs._booking_identity(canonical)
+
+
+def test_a_change_nobody_asked_for_is_not_a_change(monkeypatch):
+    biz = {"services": [{"id": "s", "name": "Haircut"}], "staff": [{"id": "m", "name": "Melissa"}]}
+    monkeypatch.setattr(cs.config_service, "get_business_info", lambda: biz)
+    for said in ("Okay, thanks!", "Bye", "no that's everything", ""):
+        assert cs._caller_asked_for_a_change(said, biz) is False, said
+
+
+def test_a_real_correction_is_never_mistaken_for_noise(monkeypatch):
+    biz = {"services": [{"id": "s", "name": "Haircut"}], "staff": [{"id": "m", "name": "Melissa"}]}
+    monkeypatch.setattr(cs.config_service, "get_business_info", lambda: biz)
+    for said in (
+        "actually, make it 3 PM",
+        "sorry, 3 PM",
+        "can we do Thursday instead",
+        "can you add a haircut too",
+        "with Melissa please",
+    ):
+        assert cs._caller_asked_for_a_change(said, biz) is True, said
+
+
+def test_a_reply_that_is_only_a_booking_line_is_never_read_aloud():
+    """It used to fall back to the raw text when stripping left nothing, so the caller
+    heard "BOOKING colon Lana pipe pipe pipe…" — hidden while the booking path always
+    replaced the reply, and surfaced the moment a line was parsed and then dropped."""
+    assert cs._strip_booking_directive_for_voice("BOOKING: Lana|||2026-09-03|2 PM|Cut|") == ""
+    assert cs._strip_message_directive_for_voice("MESSAGE: call her back") == ""
+    # A reply with words in it keeps them.
+    assert (
+        cs._strip_booking_directive_for_voice("All set. BOOKING: Lana|||2026-09-03|2 PM|Cut|")
+        == "All set."
+    )
+
+
 # --- landlines -----------------------------------------------------------------
 
 

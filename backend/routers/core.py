@@ -160,6 +160,10 @@ def handle_conversation(
                     ai_response = "That time slot just got booked. Would you like to try another time or another day?"
 
         ai_response = conversation_service._strip_booking_directive_for_voice(ai_response or "")
+        if not ai_response:
+            # The reply was nothing but the machine directive; say something human
+            # rather than reading the marker back.
+            ai_response = "Thanks—we've noted that. Let us know if you need anything else."
         if (
             "schedule" in request.message.lower()
             or "appointment" in request.message.lower()
