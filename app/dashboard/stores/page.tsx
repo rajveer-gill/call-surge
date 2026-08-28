@@ -28,6 +28,8 @@ type Store = {
   name: string
   org_id: string | null
   org_name: string | null
+  /** What callers hear, when it differs from the filed name. Blank when the same. */
+  public_name?: string | null
   role: string
   plan: string
   phone?: string | null
@@ -434,6 +436,9 @@ export default function StoresPage() {
                         </div>
                         <div className="truncate text-xs text-zinc-500">
                           {s.org_name ? `${s.org_name} · ` : ''}
+                          {s.public_name && s.public_name !== s.name
+                            ? `answers as "${s.public_name}" · `
+                            : ''}
                           {s.unread_messages > 0
                             ? `${s.unread_messages} unread message${s.unread_messages === 1 ? '' : 's'}`
                             : s.plan}

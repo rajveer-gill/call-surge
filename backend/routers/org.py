@@ -103,6 +103,8 @@ def _store_setup_state(store: dict) -> dict:
         "forwarding_required": byon,
         "forwarding_verified": verified,
         "existing_business_number": (cfg.get("existing_business_number") or "").strip(),
+        # Free — cfg is already in hand. Blank when it matches the record name.
+        "public_name": (cfg.get("public_name") or "").strip(),
     }
 
 
@@ -228,6 +230,7 @@ def get_org_stores(
                 "client_id": cid,
                 "tenant_id": s.get("id"),
                 "name": s.get("name"),
+                "public_name": setup.get("public_name") or "",
                 "org_id": s.get("org_id"),
                 "org_name": s.get("org_name"),
                 "role": s.get("org_role"),

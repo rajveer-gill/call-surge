@@ -2773,8 +2773,10 @@ def db_tenant_set_billing_exempt(tenant_id: str, exempt_until: Optional[datetime
         return False
 
 def db_tenant_set_name(tenant_id: str, name: str) -> bool:
-    """Rename a tenant (the business name callers hear in the greeting). Returns True
-    on success; a blank name is rejected rather than wiping the column."""
+    """Rename a tenant — the name on the record, shown in the store list, the org
+    dashboard and admin. What callers hear is config public_name when set, and this
+    otherwise (see config_service.customer_facing_name). Returns True on success; a
+    blank name is rejected rather than wiping the column."""
     clean = (name or "").strip()
     if not clean:
         return False

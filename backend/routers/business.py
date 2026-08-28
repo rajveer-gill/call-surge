@@ -935,6 +935,21 @@ async def api_update_business_info(
                 raise HTTPException(status_code=403, detail=msg) from e
             raise HTTPException(status_code=400, detail=msg) from e
     config_service.save_raw_client_config(cid, data)
+    # The store list, the org dashboard and the admin console read tenants.name,
+    # not the config. Renaming from Settings wrote only the config, so those screens
+    # kept showing whatever the store was created as — "Lana's Store" long after
+    # Settings said "19765 Gig Harbor". Only the creation path ever synced the two.
+    if update.name is not None and runtime.USE_DB:
+        renamed = (update.name or "").strip()
+        tenant_id = str(tid.get("id") or "")
+        if renamed and tenant_id and renamed != (tid.get("name") or "").strip():
+            try:
+                if not database.db_tenant_set_name(tenant_id, renamed):
+                    logger.warning("tenant_rename_failed cid=%s", cid)
+            except Exception as e:
+                logger.warning(
+                    "tenant_rename_error cid=%s err=%s: %s", cid, type(e).__name__, e
+                )
     if voice_affecting:
         voice_service.invalidate_voice_cache(cid)
         deps.create_tracked_task(
