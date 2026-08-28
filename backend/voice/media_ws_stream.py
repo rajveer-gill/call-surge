@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import websockets
 from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
 
 import config_service
 import runtime
@@ -91,7 +92,30 @@ class _BidiSession:
 
     # ---- outbound websocket messages (Twilio bidirectional protocol) ----
     async def _send(self, obj: dict) -> None:
-        await self.ws.send_text(json.dumps(obj))
+        """Send one Twilio frame, tolerating a caller who has already hung up.
+
+        The caller hanging up mid-sentence closes the socket while _speak is still
+        streaming frames, and every one of those calls raised
+        RuntimeError('Cannot call "send" once a close message has been sent') out of
+        an un-awaited task — a full traceback per hangup, for the most ordinary
+        thing a caller can do. Nothing was broken for the caller, who had already
+        gone, but the noise buries real errors and the speak loop died wherever it
+        happened to be rather than finishing tidily.
+
+        Marks the session closing so the loop stops rather than raising per frame.
+        """
+        if self._closing:
+            return
+        try:
+            await self.ws.send_text(json.dumps(obj))
+        except (RuntimeError, WebSocketDisconnect) as e:
+            # Only the socket being gone. Anything else is a real fault and must
+            # keep raising rather than vanishing into a swallowed exception.
+            if isinstance(e, RuntimeError) and "close message" not in str(e):
+                raise
+            if not self._closing:
+                self._closing = True
+                voice_info("bidi_send_after_close", call_sid=self.call_sid)
 
     async def _send_media(self, frame: bytes) -> None:
         await self._send({
@@ -151,6 +175,14 @@ class _BidiSession:
             if self.interrupt.is_set():
                 interrupted = True
                 break
+            if self._closing:
+                # They hung up. Stop streaming into a socket that is gone.
+                self.speaking = False
+                voice_info(
+                    "bidi_reply_abandoned", call_sid=self.call_sid, frames=sent,
+                    reason="caller_hung_up",
+                )
+                return
             await self._send_media(fr)
             sent += 1
             # Pace against an absolute clock (not a per-frame sleep, which drifts slow): send
