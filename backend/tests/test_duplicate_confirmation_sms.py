@@ -66,3 +66,28 @@ def test_the_cache_cannot_grow_without_bound():
     for i in range(cs._SENT_CONFIRMATIONS_MAX + 20):
         cs._confirmation_already_sent(f"CA_{i}", "+19255550184", "body")
     assert len(cs._SENT_CONFIRMATIONS) <= cs._SENT_CONFIRMATIONS_MAX
+
+
+# --- the key has to actually arrive ------------------------------------------
+
+def test_dedupe_uses_the_call_sid_parameter_not_just_the_dict(monkeypatch):
+    """The first version keyed on call_data["call_sid"], which is empty on the live
+    voice path, so every key was blank and nothing was ever suppressed. It shipped
+    inert and a second identical text still went out on a real call.
+
+    _send_booking_confirmation_sms takes call_sid as a parameter; that is where it
+    actually is.
+    """
+    import inspect
+
+    src = inspect.getsource(cs._send_booking_confirmation_sms)
+    assert "call_sid or call_data.get(\"call_sid\")" in src, (
+        "the dedupe key must fall back to the call_sid parameter, not read the dict alone"
+    )
+
+
+def test_identical_text_is_suppressed_when_the_sid_is_present():
+    _reset()
+    body = "Request with the salon: Friday 4:00 PM with Terrance."
+    assert cs._confirmation_already_sent("CAb1ad2b", "+19259550195", body) is False
+    assert cs._confirmation_already_sent("CAb1ad2b", "+19259550195", body) is True

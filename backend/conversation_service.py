@@ -1409,7 +1409,11 @@ def _send_booking_confirmation_sms(
     #
     # Keyed on the exact body, so a genuine correction — a different time, a
     # different stylist — still goes out. Only the repeat is dropped.
-    call_sid_for_dedupe = (call_data.get("call_sid") or "").strip()
+    # The parameter first, then the dict. This read only call_data["call_sid"], which
+    # is empty on this path, so the key was always blank and the suppression below
+    # never once ran — it shipped inert. Same resolution order the reconcile path
+    # already uses a few hundred lines down.
+    call_sid_for_dedupe = (call_sid or call_data.get("call_sid") or "").strip()
     if to_number_sms and _confirmation_already_sent(call_sid_for_dedupe, to_number_sms, thanks_msg):
         sms_info(
             "post_booking_confirmation_suppressed_duplicate",
