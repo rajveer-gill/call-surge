@@ -30,31 +30,46 @@ DEFAULT_SLOT_DURATION_MINUTES = 30
 def _service_duration_minutes_for_reason(
     reason: Optional[str], info: Optional[dict] = None
 ) -> Optional[int]:
-    """Return configured service duration when reason matches the menu; else None."""
+    """Total configured minutes for everything named in reason; None when nothing matches.
+
+    A reason can name more than one service ("Haircut + All Over Color"), so the block
+    on the calendar is the SUM of what was booked. Reserving 30 minutes for two hours
+    of work is how a stylist ends up double-booked on their own day.
+    """
     raw = (reason or "").strip()
     if not raw or raw == "—":
         return None
     biz = info or config_service.get_business_info()
-    canonical, _ = _normalize_service_choice_for_booking(raw, biz)
-    search = (canonical or raw).strip().lower()
-    if not search:
+    chosen, _ = normalize_service_choices_for_booking(raw, biz)
+    if not chosen:
         return None
-    for svc in config_service._normalize_service_entries(biz.get("services") or []):
-        nm = (svc.get("name") or "").strip().lower()
-        if not nm:
+    by_name = {
+        (s.get("name") or "").strip().lower(): s
+        for s in config_service._normalize_service_entries(biz.get("services") or [])
+        if (s.get("name") or "").strip()
+    }
+    total = 0
+    matched = False
+    for name in chosen:
+        svc = by_name.get(name.strip().lower())
+        if svc is None:
             continue
-        if search == nm or search in nm or nm in search:
-            try:
-                return max(
-                    5,
-                    min(
-                        int(svc.get("duration_minutes") or DEFAULT_SLOT_DURATION_MINUTES),
-                        480,
-                    ),
-                )
-            except (TypeError, ValueError):
-                return DEFAULT_SLOT_DURATION_MINUTES
-    return None
+        matched = True
+        raw_minutes = svc.get("duration_minutes")
+        # `or DEFAULT` would turn a deliberate 0 (an add-on that takes no time of its
+        # own) into half an hour of padding on every appointment it joins.
+        if raw_minutes in (None, ""):
+            raw_minutes = DEFAULT_SLOT_DURATION_MINUTES
+        try:
+            minutes = int(raw_minutes)
+        except (TypeError, ValueError):
+            minutes = DEFAULT_SLOT_DURATION_MINUTES
+        # An add-on legitimately carries 0 minutes of its own (a $5 master-stylist
+        # charge is not five minutes), so only the total gets a floor.
+        total += max(0, min(minutes, 480))
+    if not matched:
+        return None
+    return max(5, min(total, 480))
 
 def _booking_duration_minutes(
     booking: dict, info: Optional[dict] = None
@@ -157,7 +172,11 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
         # customer must not be told otherwise. The old wording fell through to "your
         # updated appointment info on file", which reads like a confirmation for someone
         # whose request hasn't even been looked at.
-        intro = "Your request is with the salon — nothing is booked yet, they'll confirm your time with you:"
+        intro = (
+            "APPOINTMENT REQUEST — nothing is booked yet.\n"
+            "This is a request we've passed to the salon — no time is held for you and "
+            "they'll confirm it with you. Here's what we sent them:"
+        )
         footer = "Reply if you'd like to change anything before they confirm.\n\n"
     else:
         intro = "Here's your updated appointment info on file:"
@@ -240,26 +259,90 @@ def _staff_display_name_for_appointment(apt: dict, info: Optional[dict] = None) 
             return (s.get("name") or "").strip()
     return ""
 
+SERVICE_JOINER = " + "
+
+
+def normalize_service_choices_for_booking(
+    reason_raw: Optional[str], info: Optional[dict] = None
+) -> tuple[List[str], bool]:
+    """Every menu service named in the reason field, in the order the caller said them.
+
+    Returns (canonical_names, service_required).
+
+    One appointment is regularly more than one service — "a haircut and an all-over
+    color", "a cut, and can you add a highlight". The single-service version of this
+    matched the first menu entry it found and returned it alone, so the second service
+    was dropped on the floor: the AI said it would add the highlight, the request that
+    reached the salon said Haircut, and nobody knew until the guest was in the chair.
+
+    Longest names are matched first so "Color" inside "All Over Color" cannot claim
+    the text that belongs to the longer entry.
+    """
+    biz = info or config_service.get_business_info()
+    services = config_service._normalize_service_entries((biz or {}).get("services") or [])
+    reason = (reason_raw or "").strip()
+    if not services:
+        return ([reason] if reason and reason != "—" else []), False
+    if not reason or reason == "—":
+        return [], True
+    reason_l = reason.lower()
+    names = sorted(
+        ((s.get("name") or "").strip() for s in services if (s.get("name") or "").strip()),
+        key=len,
+        reverse=True,
+    )
+    # Claim each stretch of the reason text once, so an entry that overlaps a longer
+    # one already matched cannot match the same characters again.
+    claimed = [False] * len(reason_l)
+    found: list[tuple[int, str]] = []
+    for nm in names:
+        nml = nm.lower()
+        start = reason_l.find(nml)
+        while start != -1:
+            if not any(claimed[start : start + len(nml)]):
+                for i in range(start, start + len(nml)):
+                    claimed[i] = True
+                found.append((start, nm))
+                break
+            start = reason_l.find(nml, start + 1)
+    if found:
+        return [nm for _, nm in sorted(found)], True
+    # The reason is a fragment of a menu name ("cut" for "Long Cut") rather than the
+    # other way round — the single-service behavior this replaced, kept for that case.
+    for nm in names:
+        if reason_l in nm.lower():
+            return [nm], True
+    return [], True
+
+
+def primary_service_name(names: List[str], info: Optional[dict] = None) -> Optional[str]:
+    """The service the appointment is really for — the first that is not an add-on.
+
+    "Highlight and a haircut" is a haircut appointment with a highlight on it, whichever
+    order the caller happened to say them in.
+    """
+    biz = info or config_service.get_business_info()
+    for nm in names:
+        if nm and not config_service.is_addon_service(nm, biz):
+            return nm
+    return names[0] if names else None
+
+
 def _normalize_service_choice_for_booking(
     reason_raw: Optional[str], info: Optional[dict] = None
 ) -> tuple[Optional[str], bool]:
-    """Return (canonical_service_name_or_none, service_required)."""
-    biz = info or config_service.get_business_info()
-    services = config_service._normalize_service_entries((biz or {}).get("services") or [])
-    if not services:
-        return (reason_raw or "").strip() or None, False
-    reason = (reason_raw or "").strip()
-    if not reason or reason == "—":
-        return None, True
-    reason_l = reason.lower()
-    for s in services:
-        nm = (s.get("name") or "").strip()
-        if not nm:
-            continue
-        nml = nm.lower()
-        if reason_l == nml or reason_l in nml or nml in reason_l:
-            return nm, True
-    return None, True
+    """Return (canonical_service_name_or_none, service_required).
+
+    The PRIMARY service only — callers that care about every service the guest asked
+    for use normalize_service_choices_for_booking.
+    """
+    chosen, required = normalize_service_choices_for_booking(reason_raw, info)
+    return primary_service_name(chosen, info), required
+
+
+def format_service_choices(names: List[str]) -> str:
+    """The reason field as it is stored and shown: 'Haircut + All Over Color'."""
+    return SERVICE_JOINER.join(n.strip() for n in names if (n or "").strip())
 
 def _optional_staff_id_validated(raw: Optional[str]) -> Optional[str]:
     """If staff_id is set, ensure it matches a row in this tenant's staff list."""

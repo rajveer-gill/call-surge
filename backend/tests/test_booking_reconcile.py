@@ -152,9 +152,13 @@ import sms_appointment_updates as _sau
 
 def _wire_voice_change(monkeypatch, *, existing, updater):
     monkeypatch.setattr(cs.runtime, "USE_DB", True)
+    # The live lookup has to return BOTH unconfirmed statuses. The first version of this
+    # fixture stubbed db_appointments_get_pending_by_phone, which in production returns
+    # only pending_review rows, while the code then demanded pending_customer — so these
+    # tests passed against a path that could never run on a real call.
     monkeypatch.setattr(
-        cs.database, "db_appointments_get_pending_by_phone",
-        lambda phone: (dict(existing) if existing else None),
+        cs.database, "db_appointments_get_by_phone_for_sms",
+        lambda phone, client_id=None: (dict(existing) if existing else None),
     )
     monkeypatch.setattr(
         cs.config_service, "get_business_info",
@@ -170,7 +174,7 @@ def _wire_voice_change(monkeypatch, *, existing, updater):
     sent = {}
     monkeypatch.setattr(
         cs, "_send_booking_confirmation_sms",
-        lambda apt, cd, cid, sid: sent.setdefault("text", "Perfect — I've texted your updated confirmation. Text YES to confirm."),
+        lambda apt, cd, cid, sid, **kw: sent.setdefault("text", "Perfect — I've texted your updated confirmation. Text YES to confirm."),
     )
     return sent
 
@@ -224,6 +228,8 @@ def test_voice_change_noop_returns_none(monkeypatch):
 
 
 def test_voice_change_skips_confirmed(monkeypatch):
+    """Internally, pending_review means the customer already texted YES and the store is
+    holding the slot. Nothing said on a later call rewrites that."""
     called = {"n": 0}
 
     def updater(bodies, apt, **k):
@@ -235,8 +241,23 @@ def test_voice_change_skips_confirmed(monkeypatch):
         existing={"id": 5, "status": "pending_review", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
         updater=updater,
     )
+    monkeypatch.setattr(cs.config_service, "is_external_booking", lambda *a, **k: False)
     assert cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA4") is None
     assert called["n"] == 0  # never touch an already-confirmed appointment
+
+
+def test_voice_change_applies_to_a_request_mode_row(monkeypatch):
+    """In request mode pending_review is where every request STARTS — the salon hasn't
+    looked at it yet. Treating it as confirmed is why "actually, make it Thursday" never
+    reached the salon on Lana's test call."""
+    sent = _wire_voice_change(
+        monkeypatch,
+        existing={"id": 5, "status": "pending_review", "date": "2026-07-06", "time": "14:00", "reason": "Short Cut", "staff_id": "s1"},
+        updater=lambda bodies, apt, **k: ({**apt, "date": "2026-07-09"}, ["date"]),
+    )
+    monkeypatch.setattr(cs.config_service, "is_external_booking", lambda *a, **k: True)
+    out = cs._apply_voice_detail_change_if_pending(_voice_call_data(), "CA5")
+    assert out and sent.get("text")
 
 
 def test_voice_change_ignores_a_question_mentioning_a_stylist(monkeypatch):

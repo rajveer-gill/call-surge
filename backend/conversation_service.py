@@ -239,6 +239,67 @@ def _caller_indicated_stylist_choice(
     return False
 
 
+def _staff_id_from_spoken_text(user_text: str, info: Optional[dict] = None) -> Optional[str]:
+    """The roster id of a stylist the caller named out loud, if any.
+
+    The staff field of a BOOKING line is filled in by the model, and it does not always
+    fill it in — or it writes the name the way the caller said it ("Terence") rather
+    than the way the roster spells it ("Terrance"), which the exact-match resolver
+    rejects. Either way the booking arrives with no stylist and the caller is asked
+    which stylist they want, for the second and third time. The name is right there in
+    what they said; read it from there.
+
+    Latest mention wins: a caller who changes their mind names the new stylist last.
+    """
+    t = (user_text or "").lower()
+    if not t.strip():
+        return None
+    best: Optional[tuple[int, str]] = None
+    for s in (info or config_service.get_business_info()).get("staff") or []:
+        name = (s.get("name") or "").strip()
+        sid = (s.get("id") or "").strip()
+        if not name or not sid:
+            continue
+        nl = name.lower()
+        pos = -1
+        for m in re.finditer(rf"\b{re.escape(nl)}\b", t):
+            pos = m.start()
+        if pos < 0 and _name_said_aloud(nl, t):
+            pos = 0
+        if pos < 0:
+            continue
+        if best is None or pos >= best[0]:
+            best = (pos, sid)
+    return best[1] if best else None
+
+
+_STYLIST_ASK_RE = re.compile(r"which stylist|stylist would you|prefer.{0,20}stylist", re.I)
+
+
+def _stylist_asked_too_many_times(
+    conversation_history: Optional[list], *, limit: int = 2
+) -> bool:
+    """Have we already asked this caller which stylist they want, twice?
+
+    Lana's second test call: she asked for a haircut and an all-over color with
+    Terrance and "got stuck in a loop of the AI asking what stylist I wanted when I
+    had already said." Whatever makes the answer unreadable — a mis-heard name, a
+    stylist who isn't on the roster, a model that leaves the field blank — asking a
+    third time will not fix it, and the caller has no way to escape it.
+
+    So the third time, we stop asking and take the request with no stylist on it. A
+    request the salon has to assign is a small piece of work for them; a caller who
+    gives up is a lost customer.
+    """
+    asked = sum(
+        1
+        for m in (conversation_history or [])
+        if (m.get("role") or "").strip() == "assistant"
+        and _STYLIST_ASK_RE.search(m.get("content") or "")
+    )
+    return asked >= limit
+
+
 def _name_said_aloud(name_lower: str, text_lower: str) -> bool:
     """Did the caller say this name, allowing for how speech comes back?
 
@@ -530,6 +591,83 @@ def _voice_booking_nudge_message(
     )
 
 
+def _services_from_recent_user_turns(
+    conversation_history: Optional[list], biz: dict
+) -> List[str]:
+    """The services named in the caller's most recent turn that named any.
+
+    Read newest-first rather than over the whole transcript: a caller who asks what a
+    haircut costs and then books a colour has said both words on the call, and rolling
+    them together would book them for a service they never asked for. What they last
+    asked for is what they want — and it takes every service in that one turn, so "a
+    haircut and an all over color" stays two services.
+    """
+    for m in reversed(conversation_history or []):
+        if (m.get("role") or "").strip() != "user":
+            continue
+        text = (m.get("content") or "").strip()
+        if not text:
+            continue
+        names, _ = booking_service.normalize_service_choices_for_booking(text, biz)
+        if names:
+            return names
+    return []
+
+
+def booking_details_recap_note(
+    conversation_history: Optional[list], info: Optional[dict] = None
+) -> Optional[str]:
+    """What the caller has already told us, handed back to the model each turn.
+
+    Lana's first test call: she asked for a haircut on a day that was not available,
+    and when she offered a different day the AI asked what service she wanted — again.
+    Nothing was lost from the transcript; the model simply treated the new day as the
+    start of a new booking. Her question afterwards was the right one: "Can the AI
+    remember the service if you need to book a different day, or will customers have
+    to repeat the service each time?"
+
+    Rather than hope a longer instruction fixes it, the service and stylist are pulled
+    out of what the caller actually said — deterministically, the same matchers the
+    booking validator uses — and put in front of the model as facts it already has.
+    """
+    biz = info or config_service.get_business_info()
+    if not _conversation_suggests_booking(conversation_history):
+        return None
+    user_text = _conversation_user_text(conversation_history)
+    if not user_text.strip():
+        return None
+    services = _services_from_recent_user_turns(conversation_history, biz)
+    stylist = ""
+    sid = _staff_id_from_spoken_text(user_text, biz)
+    if sid:
+        stylist = next(
+            (
+                (s.get("name") or "").strip()
+                for s in (biz.get("staff") or [])
+                if (s.get("id") or "").strip() == sid
+            ),
+            "",
+        )
+    elif any(p in user_text.lower() for p in _STYLIST_NO_PREF_PHRASES):
+        stylist = "no preference — any available stylist is fine"
+    known: List[str] = []
+    if services:
+        known.append("Service(s) they asked for: " + ", ".join(services))
+    if stylist:
+        known.append(f"Stylist: {stylist}")
+    if not known:
+        return None
+    return (
+        "DETAILS THE CALLER HAS ALREADY GIVEN YOU ON THIS CALL:\n"
+        + "\n".join(f"- {k}" for k in known)
+        + "\nDo NOT ask for any of these again — they have already answered. If the day "
+        "or time they asked for does not work, KEEP the service and stylist above and ask "
+        "only for a different day or time; never restart the booking or re-ask the service. "
+        "If they name more than one service, the request covers ALL of them together — "
+        "carry every one into the BOOKING line, joined with ' + '."
+    )
+
+
 # Structural patterns for "the model is claiming a booking exists". Regex (not literal
 # substrings) so paraphrases and tense changes can't slip through — a literal blocklist is
 # exactly how "Perfect, I've got everything I need." reached a live customer demo while
@@ -702,6 +840,10 @@ def _extract_booking_line_from_conversation(
         "NEVER put a stylist name in the time field, "
         "(6) service/reason from menu, (7) stylist name.\n"
         "Leave phone and email empty. reason=exact service from menu if known. "
+        "If the caller asked for MORE THAN ONE service in this visit (\"a haircut and an "
+        "all over color\", \"add a highlight\"), put EVERY one of them in the reason field "
+        "joined with ' + ' — e.g. 'Haircut + All Over Color'. Dropping one loses a service "
+        "the caller asked for. "
         "staff=stylist name if chosen.\n"
         "If the caller CHANGED a detail during the call (e.g. asked for a different time, day, "
         "service, or stylist), use the LATEST value they agreed to — not the earlier one.\n"
@@ -857,16 +999,18 @@ def _caller_phone_for_booking(booking_phone: Optional[str], from_num: str) -> st
 # salon confirms to them. It also has to agree with the SMS, which asks for no reply.
 _SPOKEN_AFTER_BOOKING = {
     ("request", "texted"): (
-        "I've sent your request to the salon and texted you the details. "
-        "They'll confirm your time with you shortly — just reply to that text "
-        "if anything needs changing."
+        "I've sent your request to the salon and texted you the details. This is a "
+        "request, not a confirmed appointment — they'll confirm your time with you "
+        "shortly. Just reply to that text if anything needs changing."
     ),
     ("request", "sms_failed"): (
-        "Your request is saved and the salon will confirm your time with you. "
-        "We couldn't send you a text from this line right now."
+        "Your request is saved — it's a request, not a confirmed appointment, and the "
+        "salon will confirm your time with you. We couldn't send you a text from this "
+        "line right now."
     ),
     ("request", "no_phone"): (
-        "We've saved your request and the salon will confirm your time with you."
+        "We've saved your request. It's a request rather than a confirmed appointment, "
+        "and the salon will confirm your time with you."
     ),
     ("internal", "texted"): (
         "I've texted you the details. Please check your phone and reply YES or CONFIRM "
@@ -882,11 +1026,71 @@ _SPOKEN_AFTER_BOOKING = {
         "We've saved your booking request. We don't have a mobile number on this call to "
         "text you—please call back or text us from your phone with YES to confirm."
     ),
+    # The caller is on a landline. Twilio told us the number cannot receive SMS at all,
+    # so promising a text would be a promise we already know we cannot keep.
+    ("request", "not_textable"): (
+        "This number can't receive texts, so I can't send you the details — but your "
+        "request is with the salon and they'll call you on this number to confirm the time."
+    ),
+    ("internal", "not_textable"): (
+        "This number can't receive texts, so I can't send you the details — but I've saved "
+        "your request and the shop will call you back on this number to confirm."
+    ),
+    # A change late in the same call. They already have a text; another one seconds later
+    # says nothing new, so the final details go out once, when the call ends.
+    ("request", "deferred"): (
+        "I've updated your request with the salon. I'll send you one text with the final "
+        "details when we hang up, and they'll confirm your time with you."
+    ),
+    ("internal", "deferred"): (
+        "I've updated your request. I'll send you one text with the final details when we "
+        "hang up."
+    ),
 }
 
 
 _SENT_CONFIRMATIONS: dict = {}
 _SENT_CONFIRMATIONS_MAX = 500
+
+# How many confirmation texts one call may ever produce, in total.
+#
+# Lana's first test call ended with five text messages. Every amendment supersedes the
+# draft and writes a new appointment row, and each one texted the caller again — from
+# the caller's side, five texts about one haircut with nothing to say which is current.
+#
+# One text when the request is taken, and (only if something changed after that) one
+# more when the call ends carrying the final details. Never a stream of them mid-call.
+DEFAULT_BOOKING_TEXTS_PER_CALL = 2
+
+_CALL_TEXT_COUNTS: dict = {}
+_CALL_TEXT_COUNTS_MAX = 500
+
+
+def _booking_texts_per_call_limit() -> int:
+    raw = (os.getenv("MAX_BOOKING_TEXTS_PER_CALL") or "").strip()
+    try:
+        return max(1, int(raw)) if raw else DEFAULT_BOOKING_TEXTS_PER_CALL
+    except ValueError:
+        return DEFAULT_BOOKING_TEXTS_PER_CALL
+
+
+def _in_call_booking_text_budget() -> int:
+    """Texts allowed while the caller is still on the line — one fewer than the total,
+    so there is always one left for the final details at the end of the call."""
+    return max(1, _booking_texts_per_call_limit() - 1)
+
+
+def booking_texts_sent_on_call(call_sid: str) -> int:
+    return int(_CALL_TEXT_COUNTS.get((call_sid or "").strip(), 0))
+
+
+def _note_booking_text_sent(call_sid: str) -> None:
+    sid = (call_sid or "").strip()
+    if not sid:
+        return
+    if len(_CALL_TEXT_COUNTS) >= _CALL_TEXT_COUNTS_MAX:
+        _CALL_TEXT_COUNTS.clear()
+    _CALL_TEXT_COUNTS[sid] = _CALL_TEXT_COUNTS.get(sid, 0) + 1
 
 
 def _confirmation_already_sent(call_sid: str, to_number: str, body: str) -> bool:
@@ -918,6 +1122,41 @@ def post_booking_spoken_confirmation(status: str, outcome: str) -> str:
     """
     mode = "request" if (status or "").strip() == "pending_review" else "internal"
     return _SPOKEN_AFTER_BOOKING[(mode, outcome)]
+
+
+def _end_call_after_booking_enabled() -> bool:
+    """Hang up once the caller has been told their details are on the way.
+
+    Lana's first test call: "After it tells me that I will get a text with the details,
+    it does not disconnect the call. It continues to repeat itself." There is nothing
+    left to say at that point — the receptionist has taken the request and told them
+    what happens next — but the pipeline always set up another listen, so the AI kept
+    talking, kept re-emitting BOOKING lines, and kept texting.
+
+    Set VOICE_END_CALL_AFTER_BOOKING=0 to keep the line open instead.
+    """
+    raw = (os.getenv("VOICE_END_CALL_AFTER_BOOKING") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _goodbye_line(info: Optional[dict] = None) -> str:
+    biz = info if info is not None else config_service.get_business_info()
+    name = config_service.customer_facing_name(biz) if biz else ""
+    return (
+        f"Thanks for calling {name}. Have a great day. Goodbye."
+        if name
+        else "Thanks for calling. Have a great day. Goodbye."
+    )
+
+
+def _close_call_after_booking(call_data: dict, ai_text: str) -> str:
+    """Say goodbye and mark the call for hangup once the request is taken."""
+    if not _end_call_after_booking_enabled():
+        return ai_text
+    call_data["end_call_after_reply"] = True
+    text = (ai_text or "").strip()
+    goodbye = _goodbye_line()
+    return f"{text} {goodbye}".strip() if text else goodbye
 
 
 def _booking_identity(booking: dict) -> tuple:
@@ -992,7 +1231,8 @@ def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[
     frag = (fragment or "").strip()
     if not frag:
         return None
-    staff = config_service.get_business_info().get("staff") or []
+    biz = config_service.get_business_info()
+    staff = biz.get("staff") or []
     for s in staff:
         sid = (s.get("id") or "").strip()
         if sid and frag == sid:
@@ -1000,7 +1240,10 @@ def resolve_staff_id_from_booking_fragment(fragment: Optional[str]) -> Optional[
         name = (s.get("name") or "").strip()
         if name and frag.lower() == name.lower():
             return sid if sid else None
-    return None
+    # The model writes the name as the caller said it — "Terence" for a roster that
+    # spells it "Terrance" — and an exact match drops the stylist on the floor, which
+    # sends the caller back round the "which stylist would you like?" loop.
+    return _staff_id_from_spoken_text(frag, biz)
 
 
 def _staff_name_set(info: Optional[dict] = None) -> set[str]:
@@ -1110,9 +1353,10 @@ def _validate_booking_requirements(
     staff_rows = [s for s in (biz.get("staff") or []) if (s.get("name") or "").strip()]
     staff_id = resolve_staff_id_from_booking_fragment(booking.get("staff"))
 
-    service_name, service_required = booking_service._normalize_service_choice_for_booking(
+    service_names, service_required = booking_service.normalize_service_choices_for_booking(
         booking.get("reason"), biz
     )
+    service_name = booking_service.primary_service_name(service_names, biz)
     # DIAGNOSTIC: pinpoint why the service is (re)asked — what was captured vs the menu,
     # and whether the conversation already indicates a service the matcher is missing.
     try:
@@ -1159,6 +1403,20 @@ def _validate_booking_requirements(
     # real menu item (the extraction only sets it when the caller named one); no redundant
     # re-confirm (which previously caused loops when STT phrasing differed, e.g. "shortcut").
     if service_required and not service_name:
+        # The model left the reason field empty — most often after the caller changed the
+        # day, which it treats as the start of a new booking. The caller already told us
+        # what they want; re-asking is what Lana hit ("When I changed days, it had to ask
+        # what service I wanted again"). Take it from what they said.
+        recovered = _services_from_recent_user_turns(conversation_history, biz)
+        if recovered:
+            service_names = recovered
+            service_name = booking_service.primary_service_name(recovered, biz)
+            booking["reason"] = booking_service.format_service_choices(recovered)
+            system_info(
+                "booking_service_recovered_from_transcript",
+                service=booking["reason"][:60],
+            )
+    if service_required and not service_name:
         msg = service_prompt_message(
             staff_name="",  # don't tie to a stylist yet — the stylist comes after the service
             service_choices=service_choices,
@@ -1166,10 +1424,32 @@ def _validate_booking_requirements(
         )
         return False, msg, staff_id, None
 
+    # Everything the caller asked for, kept together: this is what goes in the reason
+    # field, so a second service can't be quietly dropped between here and the salon.
+    canonical_reason = booking_service.format_service_choices(service_names) or None
+
     # THEN STYLIST — suggest only the stylists who provide the chosen service.
     if staff_rows and not staff_id:
+        # The caller named someone the model failed to put in the staff field (or spelled
+        # differently to the roster). Resolve it from what they actually said rather than
+        # asking again — asking again is how a caller who has already answered ends up
+        # answering the same question until they hang up.
+        staff_id = _staff_id_from_spoken_text(user_text, biz)
+        if staff_id:
+            # Write it back: the appointment is created from the booking dict, and it
+            # re-resolves the stylist from this field. Leaving it empty would pass the
+            # check here and still file the request with no stylist on it.
+            booking["staff"] = next(
+                (
+                    (s.get("name") or "").strip()
+                    for s in staff_rows
+                    if (s.get("id") or "").strip() == staff_id
+                ),
+                booking.get("staff") or "",
+            )
+    if staff_rows and not staff_id:
         no_pref = any(p in user_text.lower() for p in _STYLIST_NO_PREF_PHRASES)
-        if not (_caller_indicated_stylist_choice(user_text, biz) and no_pref):
+        if not no_pref and not _stylist_asked_too_many_times(conversation_history):
             choices = ", ".join(_stylists_offering_service(biz, service_name)[:5])
             msg = (
                 "Great — which stylist would you like to see?"
@@ -1181,6 +1461,7 @@ def _validate_booking_requirements(
         staff_id
         and _staff_choice_required(biz)
         and not _caller_indicated_stylist_choice(user_text, biz)
+        and not _stylist_asked_too_many_times(conversation_history)
     ):
         choices = ", ".join(_stylists_offering_service(biz, service_name)[:5])
         msg = (
@@ -1190,19 +1471,24 @@ def _validate_booking_requirements(
         )
         return False, msg, None, None
 
-    # Hard check: the chosen stylist must actually offer the chosen service. Applies to changes
-    # too (e.g. caller keeps the stylist but switches to a service that stylist doesn't do).
-    if staff_id and service_name:
+    # Hard check: the chosen stylist must actually offer every service booked. Applies to
+    # changes too (e.g. caller keeps the stylist but adds a service that stylist doesn't do).
+    if staff_id and service_names:
         srow = next((s for s in staff_rows if str(s.get("id")) == str(staff_id)), None)
-        if srow is not None and not _staff_offers_service(biz, srow, service_name):
-            name = (srow.get("name") or "").strip() or "That stylist"
-            alt = ", ".join(_stylists_offering_service(biz, service_name)[:5])
-            msg = (
-                f"{name} doesn't do {service_name}. "
-                + (f"For {service_name} you can book {alt}. " if alt else "")
-                + "Would you like one of them, or a different service?"
-            )
-            return False, msg, staff_id, service_name
+        if srow is not None:
+            not_offered = [
+                nm for nm in service_names if not _staff_offers_service(biz, srow, nm)
+            ]
+            if not_offered:
+                name = (srow.get("name") or "").strip() or "That stylist"
+                missing = " or ".join(not_offered)
+                alt = ", ".join(_stylists_offering_service(biz, not_offered[0])[:5])
+                msg = (
+                    f"{name} doesn't do {missing}. "
+                    + (f"For {missing} you can book {alt}. " if alt else "")
+                    + "Would you like one of them, or a different service?"
+                )
+                return False, msg, staff_id, canonical_reason
 
     # Backstop: never book a stylist on a day/time they don't work, even if the AI tried to.
     if staff_id and booking_date:
@@ -1214,9 +1500,9 @@ def _validate_booking_requirements(
                 srow, booking_date, (booking.get("time") or "").strip()
             )
             if unavailable:
-                return False, unavailable, staff_id, service_name
+                return False, unavailable, staff_id, canonical_reason
 
-    return True, None, staff_id, service_name
+    return True, None, staff_id, canonical_reason
 
 
 def _create_appointment_from_booking(
@@ -1249,9 +1535,11 @@ def _create_appointment_from_booking(
     if cid_for_slot:
         database.set_request_client_id(cid_for_slot)
     staff_key = resolve_staff_id_from_booking_fragment(booking.get("staff"))
-    canonical_service, _ = booking_service._normalize_service_choice_for_booking(booking.get("reason"))
-    if canonical_service:
-        booking["reason"] = canonical_service
+    canonical_services, _ = booking_service.normalize_service_choices_for_booking(
+        booking.get("reason"), _business_info
+    )
+    if canonical_services:
+        booking["reason"] = booking_service.format_service_choices(canonical_services)
 
     # --- Structural booking guards -------------------------------------------
     # These are enforced in code, not just asked for in the prompt, because a model
@@ -1259,19 +1547,29 @@ def _create_appointment_from_booking(
     # false-booking-confirm guard). Both are no-ops unless the store configured them,
     # so every other customer is unaffected.
     requested_service = (booking.get("reason") or "").strip()
-    if config_service.service_requires_consult(requested_service, _business_info):
+    # Checked per service, not on the joined text: "Haircut + Corrective Color" must
+    # still be stopped, and it matches neither list as one string.
+    checked_services = canonical_services or ([requested_service] if requested_service else [])
+    consult_hit = next(
+        (s for s in checked_services if config_service.service_requires_consult(s, _business_info)),
+        None,
+    )
+    if consult_hit:
         # e.g. corrective color: nobody knows the scope, price, or who's qualified
         # until a stylist speaks to the guest.
         system_info(
             "booking_blocked_consult_required",
-            service=requested_service,
+            service=consult_hit,
             client_id=cid_for_slot,
             name=name,
         )
         return None
-    if config_service.is_addon_service(requested_service, _business_info):
+    if checked_services and all(
+        config_service.is_addon_service(s, _business_info) for s in checked_services
+    ):
         # An add-on (conditioner, hot tools, length/master-stylist charge) rides along
-        # with a real service — it can never be the whole appointment.
+        # with a real service — it can never be the whole appointment. Alongside one,
+        # it is exactly what the caller asked for and goes through.
         system_info(
             "booking_blocked_addon_only",
             service=requested_service,
@@ -1369,11 +1667,19 @@ def _create_appointment_from_booking(
 
 
 def _send_booking_confirmation_sms(
-    apt: dict, call_data: dict, cid: Optional[str], call_sid: Optional[str]
+    apt: dict,
+    call_data: dict,
+    cid: Optional[str],
+    call_sid: Optional[str],
+    *,
+    final_summary: bool = False,
 ) -> str:
     """Send the post-booking confirmation SMS for a freshly-created appointment and update
     caller memory. Returns the caller-facing AI text describing what happened. Shared by the
-    live voice booking path and the end-of-call reconciliation backstop."""
+    live voice booking path and the end-of-call reconciliation backstop.
+
+    final_summary marks the one text sent after the call ends, carrying the details as
+    they finally stood; it spends the last of the per-call budget rather than deferring."""
     thanks_msg = booking_service._format_appointment_details_confirmation_sms(apt)
     to_number_sms = (
         (call_data.get("from_number") or "").strip()
@@ -1414,6 +1720,40 @@ def _send_booking_confirmation_sms(
     # never once ran — it shipped inert. Same resolution order the reconcile path
     # already uses a few hundred lines down.
     call_sid_for_dedupe = (call_sid or call_data.get("call_sid") or "").strip()
+    # Budget before dedupe: the dedupe cache records a body the first time it is asked
+    # about, so checking it for a text we are about to defer would burn the entry and
+    # then swallow the real send at the end of the call.
+    #
+    # One text while they are on the line. A later amendment is spoken now and texted
+    # once at the end of the call, so the caller ends up with the final details and not
+    # a thread of near-identical messages.
+    if (
+        to_number_sms
+        and not final_summary
+        and call_sid_for_dedupe
+        and booking_texts_sent_on_call(call_sid_for_dedupe) >= _in_call_booking_text_budget()
+    ):
+        call_data["confirmation_text_deferred_apt_id"] = apt.get("id")
+        sms_info(
+            "post_booking_confirmation_deferred_to_call_end",
+            client_id=cid,
+            call_sid=call_sid_for_dedupe,
+            apt_id=apt.get("id"),
+            already_sent=booking_texts_sent_on_call(call_sid_for_dedupe),
+        )
+        return post_booking_spoken_confirmation(apt.get("status") or "", "deferred")
+    if (
+        to_number_sms
+        and call_sid_for_dedupe
+        and booking_texts_sent_on_call(call_sid_for_dedupe) >= _booking_texts_per_call_limit()
+    ):
+        sms_info(
+            "post_booking_confirmation_over_call_limit",
+            client_id=cid,
+            call_sid=call_sid_for_dedupe,
+            apt_id=apt.get("id"),
+        )
+        to_number_sms = None
     if to_number_sms and _confirmation_already_sent(call_sid_for_dedupe, to_number_sms, thanks_msg):
         sms_info(
             "post_booking_confirmation_suppressed_duplicate",
@@ -1430,8 +1770,12 @@ def _send_booking_confirmation_sms(
                 "voice_booking",
                 detail={"appointment_id": apt.get("id")},
             )
+        send_detail: dict = {}
         ok = sms_service.send_sms(
-            to_number_sms, thanks_msg, from_override=from_number_sms or None
+            to_number_sms,
+            thanks_msg,
+            from_override=from_number_sms or None,
+            detail_out=send_detail,
         )
         sms_info(
             "post_booking_confirmation_sms",
@@ -1439,8 +1783,11 @@ def _send_booking_confirmation_sms(
             to_number=to_number_sms,
             from_number=from_number_sms,
             success=ok,
+            not_textable=bool(send_detail.get("not_textable")),
         )
         if ok:
+            _note_booking_text_sent(call_sid_for_dedupe)
+            call_data.pop("confirmation_text_deferred_apt_id", None)
             if runtime.USE_DB and cid and apt.get("id"):
                 try:
                     database.db_sms_session_upsert(
@@ -1473,6 +1820,25 @@ def _send_booking_confirmation_sms(
                         exc_info=True,
                     )
             ai_text = post_booking_spoken_confirmation(apt.get("status") or "", "texted")
+        elif send_detail.get("not_textable"):
+            # A landline (or any line the carrier won't deliver SMS to). Don't retry, don't
+            # promise a text, and leave the shop something to act on — the caller has no
+            # other way to hear back.
+            call_data.pop("confirmation_text_deferred_apt_id", None)
+            _store_caller_message(
+                call_data,
+                "Called from a number that cannot receive texts (landline). "
+                f"Appointment request for {apt.get('date') or '?'} at "
+                f"{booking_service._hhmm_to_ampm(apt.get('time') or '') or '?'} — "
+                "please call them back to confirm.",
+            )
+            system_info(
+                "booking_caller_not_textable",
+                client_id=cid,
+                apt_id=apt.get("id"),
+                call_sid=call_sid_for_dedupe or "",
+            )
+            ai_text = post_booking_spoken_confirmation(apt.get("status") or "", "not_textable")
         else:
             ai_text = post_booking_spoken_confirmation(apt.get("status") or "", "sms_failed")
     else:
@@ -1509,6 +1875,51 @@ def _send_booking_confirmation_sms(
         except Exception:
             pass
     return ai_text
+
+
+def flush_deferred_confirmation_sms(
+    call_data: dict, call_sid: Optional[str] = None
+) -> bool:
+    """Send the one text held back during the call, carrying the final details.
+
+    When a caller amends their request after the first confirmation went out, the change
+    is spoken and the text is deferred — otherwise every amendment is another message on
+    their phone. The call is over now, so what the row says is final: send it once.
+
+    Returns True when a text was dispatched.
+    """
+    apt_id = call_data.get("confirmation_text_deferred_apt_id")
+    if not apt_id:
+        return False
+    call_data.pop("confirmation_text_deferred_apt_id", None)
+    cid = (call_data.get("client_id") or "").strip() or None
+    apt: Optional[dict] = None
+    try:
+        if runtime.USE_DB:
+            if cid:
+                database.set_request_client_id(cid)
+            apt = database.db_appointments_get_by_id(int(apt_id), client_id=cid)
+        else:
+            apt = next(
+                (a for a in runtime.appointments if str(a.get("id")) == str(apt_id)), None
+            )
+    except Exception as e:
+        logger.warning("flush_deferred_confirmation_lookup_failed: %s", e, exc_info=True)
+        return False
+    if not apt:
+        return False
+    # Cancelled between the amendment and the hangup, or already confirmed by another
+    # path — either way this text would be telling the caller something untrue.
+    if (apt.get("status") or "").strip() not in ("pending_customer", "pending_review"):
+        return False
+    _send_booking_confirmation_sms(apt, call_data, cid, call_sid, final_summary=True)
+    sms_info(
+        "post_booking_confirmation_final_summary_sent",
+        client_id=cid,
+        apt_id=apt.get("id"),
+        call_sid=(call_sid or call_data.get("call_sid") or ""),
+    )
+    return True
 
 
 def reconcile_booking_at_call_end(
@@ -1658,19 +2069,39 @@ def _utterance_requests_change(text: str) -> bool:
 
 
 def _apply_voice_detail_change_if_pending(
-    call_data: dict, call_sid: Optional[str]
+    call_data: dict, call_sid: Optional[str], outcome_out: Optional[dict] = None
 ) -> Optional[str]:
     """Real-time mid-call change. The caller altered a detail (time/date/service/stylist) on the
     booking they already made this call, but the model narrated the change without re-emitting a
     marker. Apply it deterministically from what the caller JUST said — no reliance on the model's
     wording — and re-send the confirmation. Returns the spoken confirmation (or a truthful
     rejection when the change isn't allowed), or None if nothing changed. Only touches a still-
-    unconfirmed (pending_customer) draft; never rewrites a booking the customer already YES'd."""
+    unconfirmed draft; never rewrites a booking the customer already YES'd or the salon accepted.
+
+    It looked up the draft with db_appointments_get_pending_by_phone, which returns only
+    pending_review rows, and then required the row to be pending_customer — a pair of
+    conditions nothing can satisfy. Every mid-call change fell straight through: the caller
+    said "actually, make it Thursday", the model agreed, and the request that reached the
+    salon still said Wednesday.
+
+    Which statuses are still open depends on the store. Internally, pending_review means
+    the customer already texted YES and the store is holding the slot — untouchable here.
+    In request mode it is where every request lands the moment it is taken, so it is the
+    only status a mid-call change can ever apply to."""
     from_num = (call_data.get("from_number") or "").strip()
     if not (runtime.USE_DB and from_num):
         return None
-    existing = database.db_appointments_get_pending_by_phone(from_num)
-    if not existing or (existing.get("status") or "") != "pending_customer":
+    existing = database.db_appointments_get_by_phone_for_sms(
+        from_num, client_id=(call_data.get("client_id") or "").strip() or None
+    )
+    if not existing:
+        return None
+    open_statuses = (
+        ("pending_customer", "pending_review")
+        if config_service.is_external_booking()
+        else ("pending_customer",)
+    )
+    if (existing.get("status") or "") not in open_statuses:
         return None
     history = call_data.get("conversation_history") or []
     latest_user = ""
@@ -1684,9 +2115,18 @@ def _apply_voice_detail_change_if_pending(
     # or time (e.g. "does Andrew work Tuesdays?"), which must not silently rewrite the booking. A
     # change is applied only here, live in-call; if the caller hangs up before stating it clearly,
     # the original booking stands (there is no after-the-fact reconciler).
-    if not _utterance_requests_change(latest_user):
+    from sms_appointment_updates import (
+        apply_sms_appointment_detail_updates_from_bodies,
+        text_requests_additional_service,
+    )
+
+    # "Can you add a highlight to that" is a change to the request too, and it carries
+    # none of the pivot words above — the caller isn't replacing anything, they're
+    # adding to it.
+    if not _utterance_requests_change(latest_user) and not text_requests_additional_service(
+        latest_user
+    ):
         return None
-    from sms_appointment_updates import apply_sms_appointment_detail_updates_from_bodies
 
     biz = config_service.get_business_info() or {}
     svc_entries = config_service._normalize_service_entries(biz.get("services") or [])
@@ -1733,6 +2173,8 @@ def _apply_voice_detail_change_if_pending(
             client_id=cid or "",
             reason=(rejection.get("reason") or "")[:60],
         )
+        if outcome_out is not None:
+            outcome_out["rejected"] = True
         return rejection["message"]
     if not changed:
         return None
@@ -1855,6 +2297,9 @@ async def generate_response_async(
         # the prompt (and token cost) unbounded turn over turn. The system prompt above
         # carries the durable context (business info, booked slots, caller memory).
         messages.extend(call_data["conversation_history"][-16:])
+        recap = booking_details_recap_note(call_data["conversation_history"])
+        if recap:
+            messages.append({"role": "system", "content": recap})
         nudge = _voice_booking_nudge_message(
             call_data["conversation_history"],
             appointment_created=bool(call_data.get("appointment_created")),
@@ -1946,12 +2391,20 @@ async def generate_response_async(
         # unreliable, so phrase-matching can't catch it). Apply the change deterministically from
         # what the caller just said and re-send the confirmation — before falling through.
         if not booking and call_data.get("appointment_created"):
-            _change_text = _apply_voice_detail_change_if_pending(call_data, call_sid)
+            _change_outcome: dict = {}
+            _change_text = _apply_voice_detail_change_if_pending(
+                call_data, call_sid, _change_outcome
+            )
+            _change_rejected = bool(_change_outcome.get("rejected"))
             if _change_text:
                 # Speak the fresh confirmation/rejection and fall through the normal pipeline
                 # (history append + session persist). The booking blocks below are skipped since
                 # `booking` is None and the appointment already exists.
                 ai_text = _change_text
+                # A rejection ("Terrance isn't available that day") is the start of a
+                # conversation, not the end of one — only a confirmed change closes the call.
+                if not _change_rejected:
+                    ai_text = _close_call_after_booking(call_data, ai_text)
         # The model re-emits BOOKING freely — on a live call it produced the same line
         # when asking for a name and again on the goodbye turn, creating two identical
         # requests and texting the caller twice. An unchanged repeat is not news: drop
@@ -2036,6 +2489,7 @@ async def generate_response_async(
                         ai_text = _send_booking_confirmation_sms(
                             apt, call_data, cid, call_sid
                         )
+                        ai_text = _close_call_after_booking(call_data, ai_text)
                     else:
                         ctx = booking_context_from_business(config_service.get_business_info())
                         name_ok = bool((booking.get("name") or "").strip())
@@ -2201,11 +2655,13 @@ async def generate_response_async(
         ai_text_encoded = quote(ai_text)
         tts_audio_url = f"{base_url}/api/phone/tts-audio?text={ai_text_encoded}&voice={config_service.get_tts_voice()}"
 
-        # Mark as ready
+        # Mark as ready. end_call tells the TwiML/stream layer to hang up once this
+        # reply has played instead of listening for another turn.
         runtime.call_store.response_status[call_sid] = {
             "status": "ready",
             "audio_url": tts_audio_url,
             "ai_text": ai_text,
+            "end_call": bool(call_data.get("end_call_after_reply")),
         }
         voice_call_phase(
             "gpt_response_ready",

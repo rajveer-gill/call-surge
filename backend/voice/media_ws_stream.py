@@ -290,9 +290,22 @@ class _BidiSession:
             self._closing = True
             await self._close()
             return
+        end_call = bool(st.get("end_call"))
         runtime.call_store.response_status.pop(self.call_sid or "", None)
         if ai_text:
             await self._speak(ai_text)
+        if end_call:
+            # The request is taken and the goodbye has been spoken. Replacing the call's
+            # TwiML supersedes the <Connect> stream, which ends the call cleanly.
+            voice_info("bidi_end_call_after_booking", call_sid=self.call_sid)
+            await safe_twilio_call_update(
+                self.twilio_client,
+                self.call_sid,
+                '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>',
+                op="bidi_hangup_after_booking",
+            )
+            self._closing = True
+            await self._close()
 
     async def _drive_turns(self) -> None:
         while not self._closing:

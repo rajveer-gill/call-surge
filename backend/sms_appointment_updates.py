@@ -357,6 +357,64 @@ def parse_service_from_sms(
     return None
 
 
+# "Can you add a highlight to that", "and a blow dry as well". These mean the guest
+# wants BOTH services, not the second one instead of the first. A bare "and" is not on
+# the list: "make it a cut and color" is a replacement of the whole service, and reading
+# it as an addition would silently double the appointment.
+_SERVICE_ADD_RE = re.compile(
+    r"\b(?:add|adding|also\s+(?:want|get|do|book)|also|as\s+well|too|plus|"
+    r"along\s+with|on\s+top\s+of|throw\s+in|include)\b",
+    re.I,
+)
+
+SERVICE_JOINER = " + "
+
+
+def text_requests_additional_service(body: str) -> bool:
+    """True when the customer is asking to ADD a service, not swap the one they have."""
+    return bool(_SERVICE_ADD_RE.search(body or ""))
+
+
+def merge_added_service(current_service: str, added: str) -> Optional[str]:
+    """Existing service(s) plus the new one; None when there is nothing new to add.
+
+    Lana's first test call: she asked to add a highlight to a haircut, was told it
+    would be added, and it was not — the parser treated the new service as a
+    REPLACEMENT for the old one, and the write that followed either kept the haircut
+    or swapped it for the highlight. Either way one of the two services she asked for
+    never reached the salon.
+    """
+    add = (added or "").strip()
+    if not add:
+        return None
+    existing = [s.strip() for s in (current_service or "").split("+") if s.strip()]
+    if any(s.lower() == add.lower() for s in existing):
+        return None
+    if not existing:
+        return add
+    return SERVICE_JOINER.join(existing + [add])
+
+
+def parse_service_addition(
+    body: str, *, current_service: str = "", known_services: Optional[list[str]] = None
+) -> Optional[str]:
+    """A menu service the customer asked to ADD alongside what they already have."""
+    text = (body or "").strip()
+    if not text or not text_requests_additional_service(text):
+        return None
+    have = {s.strip().lower() for s in (current_service or "").split("+") if s.strip()}
+    for svc in sorted(
+        (s.strip() for s in (known_services or []) if (s or "").strip()),
+        key=len,
+        reverse=True,
+    ):
+        if svc.lower() in have:
+            continue
+        if re.search(r"\b" + re.escape(svc) + r"\b", text, re.I):
+            return svc
+    return None
+
+
 def parse_stylist_from_sms(
     body: str, *, current_stylist: str = "", known_stylists: Optional[list[str]] = None
 ) -> Optional[str]:
@@ -435,13 +493,18 @@ def _llm_extract_sms_change(
     sys = (
         "You read a salon customer's text messages and extract whether they want to CHANGE their "
         "existing appointment. Reply with ONLY a JSON object with keys time, date, service, "
-        "stylist, name — each the NEW requested value, or null if they didn't ask to change it.\n"
+        "add_service, stylist, name — each the NEW requested value, or null if they didn't ask "
+        "to change it.\n"
         "Rules:\n"
         "- Fill a field ONLY when the customer clearly requests that change; otherwise null.\n"
         "- time: 12-hour clock WITH am/pm, e.g. \"4:30 PM\". If they omit am/pm, choose the value "
         "that fits normal salon hours (an afternoon time is PM).\n"
         "- date: YYYY-MM-DD. Resolve \"tomorrow\", \"next Monday\", \"the 8th\" against today.\n"
-        "- service: EXACTLY one of the offered services, else null.\n"
+        "- service: EXACTLY one of the offered services, else null. Use this only when they want "
+        "it INSTEAD of the service they have.\n"
+        "- add_service: EXACTLY one of the offered services, else null. Use this when they want it "
+        "IN ADDITION to the service they already have (\"can you also add a highlight\"). Never "
+        "put the same service in both service and add_service.\n"
         "- stylist: EXACTLY one of the roster names, else null.\n"
         "- If they are only confirming (yes/ok), thanking, or asking a question, every value is null.\n"
         "- Never invent details the customer did not say."
@@ -473,13 +536,14 @@ def _llm_extract_sms_change(
             return None
         return str(v).strip()
 
-    out = {k: _val(k) for k in ("time", "date", "service", "stylist", "name")}
+    out = {k: _val(k) for k in ("time", "date", "service", "add_service", "stylist", "name")}
     sms_info(
         "sms_llm_extract_ok",
         model=model,
         got_time=bool(out["time"]),
         got_date=bool(out["date"]),
         got_service=bool(out["service"]),
+        got_add_service=bool(out["add_service"]),
         got_stylist=bool(out["stylist"]),
     )
     return out
@@ -545,6 +609,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
     latest_time: Optional[str] = None
     latest_date: Optional[str] = None
     latest_service: Optional[str] = None
+    latest_added_service: Optional[str] = None
     latest_stylist: Optional[str] = None
     cur_name = prior_name
     cur_time = prior_time
@@ -579,6 +644,7 @@ def apply_sms_appointment_detail_updates_from_bodies(
         )
         latest_date = llm.get("date") or None
         latest_service = _match_known(llm.get("service"), known_services or [])
+        latest_added_service = _match_known(llm.get("add_service"), known_services or [])
         latest_stylist = _match_known(llm.get("stylist"), staff_names)
     else:
         for body in bodies:
@@ -595,11 +661,17 @@ def apply_sms_appointment_detail_updates_from_bodies(
             dt = parse_date_from_sms(body, current_date=prior_date, today=_sms_today)
             if dt:
                 latest_date = dt
-            sv = parse_service_from_sms(
+            add_sv = parse_service_addition(
                 body, current_service=prior_service, known_services=known_services
             )
-            if sv:
-                latest_service = sv
+            if add_sv:
+                latest_added_service = add_sv
+            else:
+                sv = parse_service_from_sms(
+                    body, current_service=prior_service, known_services=known_services
+                )
+                if sv:
+                    latest_service = sv
             sty = parse_stylist_from_sms(
                 body, current_stylist=prior_stylist_name, known_stylists=staff_names
             )
@@ -612,7 +684,15 @@ def apply_sms_appointment_detail_updates_from_bodies(
         kwargs["time"] = latest_time
     if latest_date:
         kwargs["date"] = latest_date
-    if latest_service:
+    # An addition keeps what they already booked; a replacement does not.
+    if latest_added_service:
+        merged = merge_added_service(latest_service or prior_service, latest_added_service)
+        if merged:
+            kwargs["reason"] = merged
+            latest_service = merged
+        elif latest_service:
+            kwargs["reason"] = latest_service
+    elif latest_service:
         kwargs["reason"] = latest_service
     # Stylist change: resolve to a staff_id, but only apply it when the new stylist offers the
     # (effective) service AND works the (effective) day/time — never book an invalid combo.
@@ -779,11 +859,18 @@ def apply_sms_appointment_detail_updates(
         dt = parse_date_from_sms(body, current_date=(apt.get("date") or ""))
         if dt:
             kwargs["date"] = dt
-        sv = parse_service_from_sms(
+        add_sv = parse_service_addition(
             body, current_service=(apt.get("reason") or ""), known_services=known_services
         )
-        if sv:
-            kwargs["reason"] = sv
+        merged = merge_added_service(apt.get("reason") or "", add_sv or "")
+        if merged:
+            kwargs["reason"] = merged
+        else:
+            sv = parse_service_from_sms(
+                body, current_service=(apt.get("reason") or ""), known_services=known_services
+            )
+            if sv:
+                kwargs["reason"] = sv
     if not kwargs:
         return apt, []
     prior = {k: (apt.get(k) or "").strip() for k in kwargs}

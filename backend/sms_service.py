@@ -54,6 +54,22 @@ def _phone_to_e164(phone: str) -> Optional[str]:
     return None
 
 
+# Twilio errors that mean this number will never accept a text, however many times we
+# try: a landline or VoIP line with no SMS (21614), a number that isn't reachable as a
+# mobile (21612), and an unroutable/invalid recipient (21211, 21408). Retrying these
+# three times costs seconds of dead air on a live call and cannot change the answer —
+# and the caller needs to be told something true instead of "I've texted you".
+NON_TEXTABLE_ERROR_CODES = frozenset({21211, 21408, 21612, 21614})
+
+
+def _twilio_error_code(err: Exception) -> Optional[int]:
+    code = getattr(err, "code", None)
+    try:
+        return int(code) if code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def send_sms(
     to_phone: str,
     body: str,
@@ -61,6 +77,7 @@ def send_sms(
     *,
     messaging_service_sid: Optional[str] = None,
     force: bool = False,
+    detail_out: Optional[dict] = None,
 ) -> bool:
     """Send SMS via Twilio.
 
@@ -75,6 +92,9 @@ def send_sms(
 
     Records usage via db_usage_increment_sms when client_id is set.
     If force=True, skip per-tenant opt-out check (STOP/START/HELP confirmations only).
+
+    detail_out, when given, is filled in with why a send failed: error_code, and
+    not_textable=True when the recipient cannot receive SMS at all (a landline).
     """
     if not runtime.twilio_client:
         sms_info("outbound_skipped", reason="twilio_not_configured")
@@ -170,6 +190,18 @@ def send_sms(
             return True
         except Exception as e:
             last_err = e
+            code = _twilio_error_code(e)
+            if code is not None and detail_out is not None:
+                detail_out["error_code"] = code
+            if code in NON_TEXTABLE_ERROR_CODES:
+                if detail_out is not None:
+                    detail_out["not_textable"] = True
+                sms_info(
+                    "outbound_not_textable",
+                    error_code=code,
+                    to_masked=to_masked,
+                )
+                return False
             logger.warning(
                 "[SMS] outbound_twilio_retry attempt=%s error=%s to_masked=%s",
                 attempt + 1,

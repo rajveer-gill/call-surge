@@ -1172,6 +1172,20 @@ async def handle_call_status(request: Request):
                             recon_err,
                             exc_info=True,
                         )
+                # The caller amended their request after the confirmation text went out.
+                # That amendment was spoken, not texted, so they do not have the final
+                # details yet — send them once, now that the details are final.
+                try:
+                    conversation_service.flush_deferred_confirmation_sms(
+                        call_data_cp, call_sid
+                    )
+                except Exception as flush_err:
+                    logger.warning(
+                        "flush_deferred_confirmation_sms failed call_sid=%s: %s",
+                        call_sid,
+                        flush_err,
+                        exc_info=True,
+                    )
             if not client_id_before and runtime.USE_DB and call_sid in voice_service.call_log_entries:
                 client_id_before = voice_service.call_log_entries[call_sid].get("client_id")
             if not from_number_before and call_sid in voice_service.call_log_entries:
@@ -1530,6 +1544,21 @@ async def respond_with_audio(request: Request):
             )
             # Audio is ready - play it
             audio_url = status_data.get("audio_url")
+            if audio_url and status_data.get("end_call"):
+                # The request has been taken and the caller has been told what happens
+                # next. Play it and hang up: staying on the line only lets the AI repeat
+                # itself at someone who is finished (see Lana's first test call).
+                response.play(audio_url)
+                response.hangup()
+                voice_respond_branch(
+                    "play_ai_reply_then_hangup",
+                    call_sid=call_sid or "",
+                    client_id=str(runtime.call_store.sessions.get(call_sid, {}).get("client_id") or ""),
+                    status="ready",
+                )
+                if call_sid in runtime.call_store.response_status:
+                    del runtime.call_store.response_status[call_sid]
+                return Response(content=str(response), media_type="application/xml")
             if audio_url:
                 response.play(audio_url)
                 try:
