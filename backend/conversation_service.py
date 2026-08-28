@@ -122,7 +122,19 @@ def _supersede_pending_customer_drafts_for_slot(
             continue
         if (apt.get("date") or "") != date:
             continue
-        if st == "pending_customer" and phone:
+        if phone and st == "pending_review" and (apt.get("source") or "").strip() == "receptionist":
+            # A REQUEST holds nothing — the salon has not confirmed it, and the caller
+            # is told so. Superseding it at the exact slot only meant that moving the
+            # time left the old request standing: a caller who said "actually, make it
+            # 4pm" produced requests at BOTH 3pm and 4pm, and the salon had to guess.
+            #
+            # So the same rule as an unconfirmed draft: any of this caller's same-date
+            # requests taken by the receptionist are replaced, whatever the slot.
+            # Scoped to their phone and to receptionist-sourced rows, so a request
+            # someone else made, or one taken another way, is never touched.
+            if not _phones_match_for_booking(phone, apt.get("phone") or ""):
+                continue
+        elif st == "pending_customer" and phone:
             # An unconfirmed draft holds no slot, so a caller should have at most one per day.
             # Match any of THIS caller's same-date drafts so a mid-call change (time, service, OR
             # stylist) REPLACES the draft instead of leaving a stale duplicate on the dashboard.
