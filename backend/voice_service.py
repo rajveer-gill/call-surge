@@ -151,7 +151,14 @@ def _format_greeting_template(raw: str, info: dict) -> str:
 
 
 def _resolve_greeting_business_name(info: dict, tenant: Optional[dict] = None) -> str:
-    """Business name for {business_name} — config first, then tenant row from admin."""
+    """Business name for {business_name} — config first, then tenant row from admin.
+
+    public_name wins: it exists precisely because the account name is not the name
+    to answer the phone with.
+    """
+    name = (info.get("public_name") or "").strip()
+    if name:
+        return name
     name = (info.get("name") or "").strip()
     if name:
         return name

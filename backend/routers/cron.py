@@ -103,9 +103,7 @@ async def cron_appointment_reminders(request: Request):
         if not appointments:
             continue
         cfg = config_service.load_client_config(cid)
-        business_name = (
-            (cfg.get("business_name") or cfg.get("name") or "us") if cfg else "us"
-        )
+        business_name = (config_service.customer_facing_name(cfg) or "us") if cfg else "us"
         for apt in appointments:
             phone = apt.get("phone")
             if not phone:

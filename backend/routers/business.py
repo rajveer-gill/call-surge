@@ -190,6 +190,7 @@ class BusinessInfoUpdate(BaseModel):
     # for a separate forwarding_phone to satisfy call-readiness.
     transfer_takes_message: Optional[bool] = None
     quote_prices: Optional[bool] = None
+    public_name: Optional[str] = None
     # Who owns the calendar: "internal" (we do — the default for everyone) or
     # "external" (it lives in Zenoti/Mindbody/etc and we can't write to it, so the AI
     # takes requests staff approve). See config_service.BOOKING_MODES.
@@ -326,6 +327,7 @@ def get_setup_status(
         "forwarding_phone_ready": store_phone_ready,
         "transfer_takes_message": take_message,
         "quote_prices": config_service.quotes_prices(info),
+        "public_name": (info.get("public_name") or ""),
         "voice_ready": voice_ready,
         "roster_only_gap": roster_only_gap,
         "twilio_number_set": twilio_number_set,
@@ -825,6 +827,9 @@ async def api_update_business_info(
         data["transfer_takes_message"] = bool(update.transfer_takes_message)
     if update.quote_prices is not None:
         data["quote_prices"] = bool(update.quote_prices)
+    if update.public_name is not None:
+        data["public_name"] = update.public_name.strip()
+        voice_affecting = True
     if update.closures is not None:
         import staff_schedule
 

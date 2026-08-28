@@ -1167,9 +1167,7 @@ Respond naturally. If they confirm it's correct, say we'll text when the busines
                             continue
                         cfg = config_service.load_client_config(tenant["client_id"])
                         business_name = (
-                            (cfg.get("business_name") or cfg.get("name") or "us")
-                            if cfg
-                            else "us"
+                            (config_service.customer_facing_name(cfg) or "us") if cfg else "us"
                         )
                         msg = template.replace(
                             "{business_name}", business_name

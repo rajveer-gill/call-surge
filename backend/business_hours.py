@@ -216,7 +216,12 @@ def is_past_closing_for_date(
 
 
 def same_day_after_hours_message(info: Optional[dict] = None) -> str:
-    biz = ((info or {}).get("name") or "the shop").strip() or "the shop"
+    data = info or {}
+    biz = (
+        (data.get("public_name") or "").strip()
+        or (data.get("name") or "").strip()
+        or "the shop"
+    )
     return (
         f"We're already closed for today at {biz}. "
         "Would another day work for your appointment?"
@@ -229,7 +234,11 @@ def after_hours_prompt_block(
     local_now = business_local_now(info, now)
     if not is_past_closing_for_date(info, local_now.date(), now):
         return None
-    biz = (info.get("name") or "the business").strip() or "the business"
+    biz = (
+        (info.get("public_name") or "").strip()
+        or (info.get("name") or "").strip()
+        or "the business"
+    )
     hours = (info.get("hours") or "").strip()
     hours_line = f" Store hours: {hours}" if hours else ""
     # Spell out tomorrow's status explicitly. Without it the model has inverted things after hours —

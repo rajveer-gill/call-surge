@@ -214,7 +214,13 @@ def build_system_prompt(
         booked_slots_prompt_text: Output of get_booked_slots_prompt_text when include_booked_slots;
             may be empty string when no slots are booked.
     """
-    name = (business_info.get("name") or "the business").strip()
+    # public_name when they file themselves under something a caller would not
+    # recognise ("19765 Gig Harbor" vs "Gig Harbor Hair Masters").
+    name = (
+        (business_info.get("public_name") or "").strip()
+        or (business_info.get("name") or "").strip()
+        or "the business"
+    )
     receptionist_name = (business_info.get("receptionist_name") or "").strip()
     hours = (business_info.get("hours") or "").strip()
     address = (business_info.get("address") or "").strip()

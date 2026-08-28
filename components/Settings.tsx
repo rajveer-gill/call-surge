@@ -216,6 +216,7 @@ export default function Settings() {
     forwarding_phone: '',
     transfer_takes_message: false,
     quote_prices: true,
+    public_name: '',
     email: '',
     address: '',
     menu_link: '',
@@ -371,6 +372,7 @@ export default function Settings() {
             transfer_takes_message: Boolean(d.transfer_takes_message),
             // Absent means yes — the shape every existing tenant is already in.
             quote_prices: d.quote_prices === undefined ? true : Boolean(d.quote_prices),
+            public_name: (d.public_name as string) || '',
             email: (d.email as string) || '',
             address: (d.address as string) || '',
             menu_link: (d.menu_link as string) || '',
@@ -602,6 +604,7 @@ export default function Settings() {
         forwarding_phone: form.forwarding_phone || undefined,
         transfer_takes_message: form.transfer_takes_message,
         quote_prices: form.quote_prices,
+        public_name: form.public_name ?? '',
         email: form.email || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
@@ -1091,6 +1094,25 @@ export default function Settings() {
               className="cs-field w-full"
               placeholder="Your Business Name"
             />
+            <p className="mt-1 text-xs text-gray-500">
+              How this location is filed in your records. Shown in your dashboard.
+            </p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Name callers hear <span className="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={form.public_name}
+              onChange={(e) => setForm((f) => ({ ...f, public_name: e.target.value }))}
+              className="cs-field w-full"
+              placeholder={form.name || 'Same as business name'}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Set this when customers know you by a different name than the one you
+              file under. Leave blank to use the business name.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Industry</label>

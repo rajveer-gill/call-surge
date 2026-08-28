@@ -249,6 +249,9 @@ def _config_data_to_business_info(data: dict) -> dict:
         # the PATCH writes but this does not read is stored and never applied, which
         # is exactly what happened the first time.
         "quote_prices": data.get("quote_prices", True),
+        # What customers call them, when that differs from how the business files
+        # itself. Empty means they are the same thing, which is the common case.
+        "public_name": (data.get("public_name") or "").strip(),
         "locations": data.get("locations", []),
         "greeting": data.get("greeting", ""),
         "plan": data.get("plan", "starter"),
@@ -677,6 +680,29 @@ def transfer_takes_message(info: Optional[dict] = None) -> bool:
     """
     data = info if info is not None else get_business_info()
     return bool(data.get("transfer_takes_message", False))
+
+
+def customer_facing_name(info: Optional[dict] = None) -> str:
+    """The name a caller should hear.
+
+    A franchise files its locations by number — "19765 Gig Harbor" — and that is the
+    name on the account, because it is the name their records use. Callers know the
+    shop as "Gig Harbor Hair Masters". Reading the filing name down the phone is
+    wrong in a way the business cannot fix without renaming their own account, so
+    public_name overrides it wherever a customer can hear or read it.
+
+    Falls back to the account name, so every business that has not set one is
+    unaffected.
+
+    Accepts either a business_info dict (key "name") or a raw client config
+    (key "business_name"), because the outbound SMS paths hold the raw config.
+    """
+    data = info if info is not None else get_business_info()
+    return (
+        (data.get("public_name") or "").strip()
+        or (data.get("name") or "").strip()
+        or (data.get("business_name") or "").strip()
+    )
 
 
 def quotes_prices(info: Optional[dict] = None) -> bool:
