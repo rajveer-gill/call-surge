@@ -18,30 +18,20 @@ import voice_service
 from fastapi.testclient import TestClient
 
 
-def test_the_confirmation_offers_one_last_thing_before_ending(monkeypatch):
-    """Hanging up the instant the confirmation is spoken would take away the moment a
-    caller says "oh — can you add a highlight", which is the other half of the feedback."""
+def test_the_goodbye_comes_with_the_confirmation_and_ends_the_call(monkeypatch):
+    """As soon as the text is on its way there is nothing left to say. An "anything else
+    before I let you go?" turn was tried here and taken back out: it is one more turn for
+    the model to talk into, and the complaint being fixed is that it kept talking."""
     monkeypatch.setattr(
         cs.config_service, "get_business_info", lambda: {"name": "Gill Salons"}
     )
     call_data: dict = {}
     out = cs._close_call_after_booking(call_data, "I've sent your request to the salon.")
-    assert call_data.get("end_call_after_reply") is None, "not on this turn"
-    assert call_data["post_booking_grace_offered"] is True
-    assert out.startswith("I've sent your request to the salon.")
-    assert "anything else" in out.lower()
-
-
-def test_the_turn_after_that_says_goodbye_and_hangs_up(monkeypatch):
-    monkeypatch.setattr(
-        cs.config_service, "get_business_info", lambda: {"name": "Gill Salons"}
-    )
-    call_data = {"post_booking_grace_offered": True}
-    out = cs._close_call_after_booking(call_data, "I've updated your request.")
     assert call_data["end_call_after_reply"] is True
-    assert "post_booking_grace_offered" not in call_data
+    assert out.startswith("I've sent your request to the salon.")
     assert "Goodbye" in out
     assert "Gill Salons" in out
+    assert "anything else" not in out.lower()
 
 
 def test_a_store_can_keep_the_line_open(monkeypatch):
@@ -53,10 +43,9 @@ def test_a_store_can_keep_the_line_open(monkeypatch):
     assert out == "I've texted you the details."
 
 
-def test_a_completed_booking_ends_the_call_one_turn_later(monkeypatch):
-    """End to end through the turn pipeline: the BOOKING line lands, the confirmation is
-    spoken with one last offer, and the turn after it tells the TwiML layer to hang up —
-    whatever the caller said, so the call cannot run on."""
+def test_a_completed_booking_ends_the_call_on_that_turn(monkeypatch):
+    """End to end through the turn pipeline: the BOOKING line lands, the confirmation and
+    goodbye are spoken together, and the status the TwiML layer reads says to hang up."""
     import asyncio
     from datetime import timedelta
     from unittest.mock import MagicMock
@@ -114,20 +103,10 @@ def test_a_completed_booking_ends_the_call_one_turn_later(monkeypatch):
     )
     status = runtime.call_store.response_status.get(call_sid, {})
     assert status.get("status") == "ready"
-    assert not status.get("end_call"), "the caller gets one more turn"
-    assert "anything else" in (status.get("ai_text") or "").lower()
-
-    # Whatever they say next, that is the end of the call.
-    main.client.chat.completions.create.return_value = MagicMock(
-        choices=[MagicMock(message=MagicMock(content="You're welcome!"))]
-    )
-    call_data["conversation_history"].append({"role": "user", "content": "no, that's it"})
-    asyncio.run(
-        main.generate_response_async(call_sid, call_data, "English", "https://api.example.com")
-    )
-    status = runtime.call_store.response_status.get(call_sid, {})
     assert status.get("end_call") is True
-    assert "Goodbye" in (status.get("ai_text") or "")
+    spoken = status.get("ai_text") or ""
+    assert "texted you the details" in spoken
+    assert "Goodbye" in spoken
 
 
 @pytest.fixture

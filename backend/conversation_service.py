@@ -1149,28 +1149,20 @@ def _goodbye_line(info: Optional[dict] = None) -> str:
     )
 
 
-ANYTHING_ELSE_LINE = "Is there anything else I can help you with before I let you go?"
-
-
 def _close_call_after_booking(call_data: dict, ai_text: str) -> str:
-    """Wind the call up once the request is taken — over two turns, not one.
+    """Say goodbye and hang up the moment the request is taken and the text is sent.
 
-    Hanging up the instant the confirmation is spoken also takes away the moment a
-    caller says "oh — can you add a highlight to that", which is the other half of
-    Lana's feedback. So the confirmation ends by offering one last thing, and whatever
-    they say next is answered and then the call ends. One extra turn, and the call
-    still cannot run on: the goodbye after that turn is unconditional.
+    An "anything else before I let you go?" turn was tried here and taken back out. It
+    is one more turn for the model to talk into, and the complaint being fixed is that
+    it kept talking. The caller has the details on their phone by now, and the text
+    tells them to reply to it if anything needs changing.
     """
     if not _end_call_after_booking_enabled():
         return ai_text
+    call_data["end_call_after_reply"] = True
     text = (ai_text or "").strip()
-    if call_data.get("post_booking_grace_offered"):
-        call_data.pop("post_booking_grace_offered", None)
-        call_data["end_call_after_reply"] = True
-        goodbye = _goodbye_line()
-        return f"{text} {goodbye}".strip() if text else goodbye
-    call_data["post_booking_grace_offered"] = True
-    return f"{text} {ANYTHING_ELSE_LINE}".strip() if text else ANYTHING_ELSE_LINE
+    goodbye = _goodbye_line()
+    return f"{text} {goodbye}".strip() if text else goodbye
 
 
 def _booking_identity(booking: dict) -> tuple:
@@ -2356,10 +2348,6 @@ async def generate_response_async(
             from_number=call_data.get("from_number") or None,
             client_id=call_data.get("client_id") or None,
         )
-        # Read before anything on this turn can set it: it means the PREVIOUS reply
-        # closed the booking and asked if there was anything else, so this turn is the
-        # last one. See the close at the bottom of this function.
-        grace_offered_before_turn = bool(call_data.get("post_booking_grace_offered"))
         # Diagnostic (only emitted when OBS_TRACE_TRANSCRIPT=1): the exact date + per-stylist
         # schedule the AI is reasoning over, so a wrong "tomorrow" or a misattributed stylist
         # schedule is visible in the logs instead of inferred.
@@ -2702,21 +2690,6 @@ async def generate_response_async(
         if call_data.pop("forward_unavailable", False):
             if not (config_service.get_business_info().get("forwarding_phone") or "").strip():
                 ai_text = _NO_TRANSFER_FALLBACK_TEXT
-
-        # The last turn: the previous reply took the request and asked whether there was
-        # anything else. Whatever that was, it has now been answered — say goodbye and end
-        # the call rather than looping back into another listen. Skipped when the caller
-        # has just been offered a callback, which is a question they still have to answer.
-        if (
-            grace_offered_before_turn
-            and not call_data.get("end_call_after_reply")
-            and ai_text != _NO_TRANSFER_FALLBACK_TEXT
-        ):
-            call_data.pop("post_booking_grace_offered", None)
-            if _end_call_after_booking_enabled():
-                call_data["end_call_after_reply"] = True
-                ai_text = f"{(ai_text or '').strip()} {_goodbye_line()}".strip()
-                voice_info("voice_call_closing_after_booking", call_sid=call_sid)
 
         if (ai_text or "") != _model_reply_raw:
             voice_transcript(
