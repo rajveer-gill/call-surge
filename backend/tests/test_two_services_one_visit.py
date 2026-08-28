@@ -64,6 +64,62 @@ def test_a_fragment_of_a_menu_name_still_matches():
     assert names == ["All Over Color"]
 
 
+# --- a word that covers several services --------------------------------------
+#
+# Gill Salons' own booking policy, from their Settings: "A highlight could be any of
+# the following services Mini highlight, full highlight, partial highlight, cap
+# highlight or balayage, ask for clarification." The matcher could not do that.
+
+HIGHLIGHTS = {
+    "services": [
+        {"id": "svc_cut", "name": "Haircut", "duration_minutes": 30},
+        {"id": "svc_mini", "name": "Mini Highlight", "duration_minutes": 45},
+        {"id": "svc_full", "name": "Full Highlight", "duration_minutes": 90},
+        {"id": "svc_part", "name": "Partial Highlight", "duration_minutes": 60},
+        {"id": "svc_bal", "name": "Balayage", "duration_minutes": 120},
+    ],
+    "staff": [{"id": "st_t", "name": "Terrance", "service_ids": []}],
+}
+
+
+def test_an_ambiguous_word_is_never_guessed_at():
+    """It took the longest match, so "a highlight" booked a partial highlight the
+    caller never chose."""
+    names, required = bs.normalize_service_choices_for_booking("highlight", HIGHLIGHTS)
+    assert names == []
+    assert required is True
+
+
+def test_the_caller_is_asked_which_one():
+    got = bs.service_candidates_needing_clarification("highlight", HIGHLIGHTS)
+    assert set(got) == {"Mini Highlight", "Full Highlight", "Partial Highlight"}
+
+
+def test_a_half_named_second_service_is_not_dropped():
+    """"A haircut and a highlight" matched Haircut exactly, left "highlight" matching
+    nothing on its own, and filed a haircut with the highlight silently gone."""
+    names, _ = bs.normalize_service_choices_for_booking("a haircut and a highlight", HIGHLIGHTS)
+    assert names == ["Haircut"]
+    assert bs.service_candidates_needing_clarification(
+        "a haircut and a highlight", HIGHLIGHTS
+    ), "the highlight must be asked about, not dropped"
+
+
+def test_naming_the_exact_service_asks_nothing():
+    assert bs.service_candidates_needing_clarification("Full Highlight", HIGHLIGHTS) == []
+    assert bs.service_candidates_needing_clarification("Haircut", HIGHLIGHTS) == []
+    assert (
+        bs.service_candidates_needing_clarification("Haircut + Full Highlight", HIGHLIGHTS)
+        == []
+    )
+
+
+def test_an_unambiguous_fragment_is_still_taken():
+    """Only one menu entry contains it, so there is nothing to ask about."""
+    names, _ = bs.normalize_service_choices_for_booking("balayage", HIGHLIGHTS)
+    assert names == ["Balayage"]
+
+
 def test_a_shop_with_no_menu_is_untouched():
     names, required = bs.normalize_service_choices_for_booking("trim", {"services": []})
     assert names == ["trim"]

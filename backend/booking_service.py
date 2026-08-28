@@ -308,11 +308,58 @@ def normalize_service_choices_for_booking(
     if found:
         return [nm for _, nm in sorted(found)], True
     # The reason is a fragment of a menu name ("cut" for "Long Cut") rather than the
-    # other way round — the single-service behavior this replaced, kept for that case.
-    for nm in names:
-        if reason_l in nm.lower():
-            return [nm], True
+    # other way round. Only when exactly ONE menu entry contains it: a word covering
+    # several ("highlight" where the menu lists mini, full, partial, cap) has to be
+    # asked about, not guessed at. It used to take the longest match, so a caller who
+    # said "a highlight" was booked for a partial highlight they never chose.
+    partial = [nm for nm in names if reason_l in nm.lower()]
+    if len(partial) == 1:
+        return [partial[0]], True
     return [], True
+
+
+# Words too generic to pin a service on their own.
+_SERVICE_WORD_STOPWORDS = frozenset({"and", "the", "with", "full", "mini", "cap", "partial"})
+
+
+def service_candidates_needing_clarification(
+    reason_raw: Optional[str], info: Optional[dict] = None
+) -> List[str]:
+    """Menu services a caller half-named and has to choose between.
+
+    Gill Salons' own booking policy says it: "A highlight could be any of the following
+    services Mini highlight, full highlight, partial highlight, cap highlight or
+    balayage, ask for clarification." The matcher could not do that — "a haircut and a
+    highlight" matched Haircut exactly, left "highlight" matching nothing on its own,
+    and filed a haircut with the highlight silently gone.
+
+    So whatever the exact matcher did NOT claim is checked for words that belong to
+    menu entries it did not choose. Two or more, and the caller is asked which.
+    """
+    biz = info or config_service.get_business_info()
+    services = config_service._normalize_service_entries((biz or {}).get("services") or [])
+    reason = (reason_raw or "").strip()
+    if not services or not reason or reason == "—":
+        return []
+    chosen, _ = normalize_service_choices_for_booking(reason, biz)
+    chosen_l = {c.lower() for c in chosen}
+    leftover = reason.lower()
+    for nm in chosen:
+        leftover = leftover.replace(nm.lower(), " ")
+    leftover_words = {w for w in re.findall(r"[a-z]+", leftover) if len(w) >= 4}
+    leftover_words -= _SERVICE_WORD_STOPWORDS
+    if not leftover_words:
+        return []
+    candidates: List[str] = []
+    for s in services:
+        nm = (s.get("name") or "").strip()
+        if not nm or nm.lower() in chosen_l:
+            continue
+        words = {w for w in re.findall(r"[a-z]+", nm.lower()) if len(w) >= 4}
+        words -= _SERVICE_WORD_STOPWORDS
+        if words & leftover_words:
+            candidates.append(nm)
+    return candidates if len(candidates) >= 2 else []
 
 
 def primary_service_name(names: List[str], info: Optional[dict] = None) -> Optional[str]:

@@ -1338,6 +1338,16 @@ def _apply_booking_customer_name(
         booking["name"] = mem_name
 
 
+def _spoken_list(items: list, conjunction: str = "or") -> str:
+    """"a, b or c" — read aloud, so no serial comma and no bullet points."""
+    vals = [str(i).strip() for i in items if str(i or "").strip()]
+    if not vals:
+        return ""
+    if len(vals) == 1:
+        return vals[0]
+    return f"{', '.join(vals[:-1])} {conjunction} {vals[-1]}"
+
+
 def _stylists_offering_service(biz: dict, service_name: Optional[str]) -> list:
     """Names of stylists who provide the given service (their service_ids include it, or an
     empty service_ids means they do everything). Falls back to all stylists when the service
@@ -1465,6 +1475,21 @@ def _validate_booking_requirements(
             already_asked=assistant_asked_service_recently(conversation_history),
         )
         return False, msg, staff_id, None
+
+    # Half-named service ("a highlight" where the menu lists four of them, or one asked
+    # for alongside a service that DID match). Ask which — never file the part we
+    # understood and drop the rest, which is how a highlight goes missing.
+    unclear = booking_service.service_candidates_needing_clarification(
+        booking.get("reason"), biz
+    )
+    if unclear:
+        system_info("booking_service_ambiguous", options=", ".join(unclear)[:120])
+        return (
+            False,
+            f"Just to make sure I put the right thing down — did you want {_spoken_list(unclear)}?",
+            staff_id,
+            None,
+        )
 
     # Everything the caller asked for, kept together: this is what goes in the reason
     # field, so a second service can't be quietly dropped between here and the salon.
