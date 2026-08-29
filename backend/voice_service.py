@@ -176,9 +176,35 @@ def _resolve_greeting_business_name(info: dict, tenant: Optional[dict] = None) -
     return "us"
 
 
+def _split_trailing_question(text: str) -> tuple[str, str]:
+    """Split a greeting into (everything before the closing question, the question).
+
+    Greetings almost always end by handing the call over — "How can I help you today?" —
+    and that is the cue callers answer. Anything spoken after it gets talked over, so the
+    disclosure has to go in front of it rather than behind.
+
+    Returns ("", text) when there is no trailing question to move ahead of, or when the
+    greeting is nothing but that question: with no lead-in, putting the disclosure first
+    would have the call open on legal boilerplate before the salon's own name.
+    """
+    stripped = text.rstrip()
+    if not stripped.endswith("?"):
+        return "", text
+    # The question is the last sentence; find where the one before it ended.
+    boundary = max(stripped.rfind(c, 0, len(stripped) - 1) for c in ".!?")
+    if boundary < 0:
+        return "", text
+    lead = stripped[: boundary + 1].strip()
+    question = stripped[boundary + 1 :].strip()
+    if not lead or not question:
+        return "", text
+    return lead, question
+
+
 def build_phone_greeting_payload(info: dict, tenant: Optional[dict] = None) -> dict:
     """
-    Build phone greeting text: main message first, recording disclosure always last when enabled.
+    Build phone greeting text: main message, then the recording disclosure, then the
+    greeting's closing question last so the caller answers into an open line.
     Returns a debug-friendly dict (used by get_greeting_text and GET /api/greeting-preview).
     """
     cid = (database._client_id() or (tenant or {}).get("client_id") or "").strip()
@@ -199,11 +225,15 @@ def build_phone_greeting_payload(info: dict, tenant: Optional[dict] = None) -> d
     tenant_rec = tenant if tenant is not None else _tenant_for_call_recording()
     recording_enabled = _call_recording_enabled_for_tenant(tenant_rec)
     recording_disclosure = RECORDING_DISCLOSURE_TEXT if recording_enabled else ""
-    spoken_text = (
-        f"{main_greeting} {recording_disclosure}".strip()
-        if recording_disclosure
-        else main_greeting
-    )
+    if recording_disclosure:
+        lead, question = _split_trailing_question(main_greeting)
+        spoken_text = (
+            f"{lead} {recording_disclosure} {question}".strip()
+            if lead
+            else f"{main_greeting} {recording_disclosure}".strip()
+        )
+    else:
+        spoken_text = main_greeting
 
     warnings: List[str] = []
     if "{receptionist_name}" in raw_template and not receptionist_name:
