@@ -25,6 +25,74 @@ logger = logging.getLogger("nuvatra")
 # From number for SMS — env-derived and immutable after process start.
 TWILIO_SMS_FROM = os.getenv("TWILIO_SMS_FROM") or os.getenv("TWILIO_PHONE_NUMBER") or ""
 
+# GSM 03.38 — the alphabet a carrier can pack 7 bits to the character. A message made
+# only of these fits 160 chars in one segment (153 each once it spans several). ONE
+# character outside it flips the WHOLE message to UCS-2, which holds 70 (67 each). A
+# 418-char booking confirmation is 3 segments in GSM-7 and 7 in UCS-2, and both billing
+# and the carrier daily cap count segments — so a single stray em-dash more than doubles
+# the cost of every text the platform sends.
+_GSM7_BASIC = (
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà"
+)
+# Escape-prefixed characters. Legal, but each costs two septets rather than one.
+_GSM7_EXTENDED = "^{}\\[~]|€"
+GSM7_CHARS = frozenset(_GSM7_BASIC + _GSM7_EXTENDED)
+
+# Typographic characters with a plain equivalent that says the same thing. Only
+# lookalikes belong here: the point is to stop punctuation from silently doubling the
+# segment count, NOT to force every message into GSM-7. Genuinely non-Latin content (a
+# business name in another script, an accented word with no ASCII twin) is left alone and
+# correctly sent as UCS-2 — mangling it to save a segment would be the worse bug.
+_GSM7_SUBSTITUTIONS = {
+    "—": "-",   # — em dash        (the one that was costing us)
+    "–": "-",   # – en dash
+    "‑": "-",   # ‑ non-breaking hyphen
+    "‘": "'",   # ' left single quote
+    "’": "'",   # ' right single quote / apostrophe
+    "‚": "'",   # ‚ single low quote
+    "“": '"',   # " left double quote
+    "”": '"',   # " right double quote
+    "„": '"',   # „ double low quote
+    "…": "...", # … ellipsis
+    "•": "*",   # • bullet
+    " ": " ",   # non-breaking space
+    " ": " ",   # thin space
+    " ": " ",   # narrow no-break space
+    "′": "'",   # ′ prime
+    "″": '"',   # ″ double prime
+    "−": "-",   # − minus sign
+}
+_GSM7_TRANSLATION = str.maketrans(_GSM7_SUBSTITUTIONS)
+
+
+def to_gsm7_safe(text: str) -> str:
+    """Swap typographic punctuation for its plain equivalent.
+
+    Applied to every outbound body at the send boundary rather than to any one template,
+    because the text that reaches a caller is half ours and half the tenant's — a service
+    name or business name pasted out of a word processor carries curly quotes and dashes
+    just as readily as our own copy did.
+    """
+    return (text or "").translate(_GSM7_TRANSLATION)
+
+
+def sms_segment_count(text: str) -> int:
+    """Segments a body will bill as — what the carrier counts, and what the daily cap counts."""
+    body = text or ""
+    if not body:
+        return 0
+    if all(ch in GSM7_CHARS for ch in body):
+        # Extension characters take two septets each.
+        length = sum(2 if ch in _GSM7_EXTENDED else 1 for ch in body)
+        single, multi = 160, 153
+    else:
+        length = len(body)
+        single, multi = 70, 67
+    if length <= single:
+        return 1
+    return -(-length // multi)  # ceil
+
 
 def _default_messaging_service_sid() -> str:
     """A2P-registered Messaging Service SID (read at call time so env is picked up).
@@ -99,6 +167,9 @@ def send_sms(
     if not runtime.twilio_client:
         sms_info("outbound_skipped", reason="twilio_not_configured")
         return False
+    # Before anything measures or sends it, so body_len and the segment count in the logs
+    # describe the text the carrier actually gets.
+    body = to_gsm7_safe(body)
     msid = (messaging_service_sid or _default_messaging_service_sid() or "").strip()
     from_num = (from_override or TWILIO_SMS_FROM or "").strip()
     if not msid and not from_num:
@@ -163,6 +234,9 @@ def send_sms(
                 message_sid=sid,
                 to_masked=to_masked,
                 body_len=len(body or ""),
+                # Billing and the carrier daily cap count segments, not messages — log the
+                # number that actually costs money so a regression is visible in the logs.
+                segments=sms_segment_count(body),
             )
             # Record SMS usage for billing (graceful degradation)
             if runtime.USE_DB:

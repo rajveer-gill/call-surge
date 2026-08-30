@@ -158,13 +158,13 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
         customer_line = f"Customer: {customer}"
     else:
         customer_line = (
-            "Customer: Not on file yet — reply with your name if we should update it."
+            "Customer: Not on file yet - reply with your name if we should update it."
         )
     stylist_line = f"Stylist: {stylist}\n" if stylist else ""
     if status == "pending_customer":
-        intro = "Here's what we have for you — the time is NOT locked in until you text back YES or CONFIRM:"
+        intro = "Here's what we have for you. The time is NOT locked in until you text back YES or CONFIRM:"
         footer = (
-            "Reply YES or CONFIRM only when this looks exactly right — that reserves the time and sends this to the store. "
+            "Reply YES or CONFIRM only when this looks exactly right - that reserves the time and sends this to the store. "
             "You can also reply with changes.\n\n"
         )
     elif status == "pending_review":
@@ -173,8 +173,8 @@ def _format_appointment_details_confirmation_sms(apt: dict) -> str:
         # updated appointment info on file", which reads like a confirmation for someone
         # whose request hasn't even been looked at.
         intro = (
-            "APPOINTMENT REQUEST — nothing is booked yet.\n"
-            "This is a request we've passed to the salon — no time is held for you and "
+            "APPOINTMENT REQUEST - nothing is booked yet.\n"
+            "This is a request we've passed to the salon - no time is held for you and "
             "they'll confirm it with you. Here's what we sent them:"
         )
         footer = "Reply if you'd like to change anything before they confirm.\n\n"
