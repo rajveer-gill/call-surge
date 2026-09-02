@@ -65,7 +65,9 @@ def test_prompt_includes_stylist_working_days():
     assert "Jake: works Monday, Tuesday, Wednesday" in p
     low = p.lower()
     # Hardened: the AI must refuse an off-day request and must not falsely confirm it.
-    assert "must not book them" in low
+    # Wording moved into the case-(b) branch when the rule gained an available branch
+    # (see test_prompt_stylist_available_days); the constraint asserted here is the same.
+    assert "do not book them" in low
     assert "isn't available then" in low
     # Per-stylist emphasis: never apply one stylist's schedule to another.
     assert "never apply one stylist" in low
