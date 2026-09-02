@@ -668,6 +668,105 @@ def booking_details_recap_note(
     )
 
 
+_SPOKEN_WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+# Full names only. Callers say "Sunday", not "Sun", and "sat" is an ordinary English word
+# that would resolve half the transcripts in the shop to a Saturday.
+_WEEKDAY_RE = re.compile(
+    r"\b(" + "|".join(_SPOKEN_WEEKDAYS) + r"|today|tomorrow)\b", re.IGNORECASE
+)
+
+
+def _requested_date_from_spoken_text(user_text: str, info: dict) -> Optional[str]:
+    """The date the caller last named, as YYYY-MM-DD, or None.
+
+    Last wins, the same rule the stylist matcher uses: a caller who changes their mind
+    names the new day second.
+    """
+    from business_hours import business_local_now
+
+    found = _WEEKDAY_RE.findall(user_text or "")
+    if not found:
+        return None
+    word = found[-1].lower()
+    today = business_local_now(info).date()
+    if word == "today":
+        return today.isoformat()
+    if word == "tomorrow":
+        return (today + timedelta(days=1)).isoformat()
+    target = _SPOKEN_WEEKDAYS[word]
+    ahead = (target - today.weekday()) % 7
+    return (today + timedelta(days=ahead)).isoformat()
+
+
+def stylist_day_availability_note(
+    conversation_history: Optional[list], info: Optional[dict] = None
+) -> Optional[str]:
+    """Whether the stylist the caller named works the day they named — decided here, not by the model.
+
+    Three prompt rewrites failed to stop the receptionist inventing this. Against a roster
+    reading Terrance=thu,fri,sun it told callers, on separate days:
+
+        "Terrance doesn't work on Thursdays. He is available on Friday and Sunday."
+        "Terrance doesn't work on Fridays. He is available on Thursday, Friday, and Sunday."
+        "Terrance doesn't work on Sundays. He is available on Thursday, Friday, and Sunday."
+
+    The last two refuse a day and offer that same day in one breath, which is the tell: it
+    is not reading the roster and deciding, it is completing a refusal. Every wrong answer
+    turns away a real customer and leaves appointment_created=False, indistinguishable in
+    the dashboard from a caller who changed their mind — so nobody would ever find it.
+
+    The backend has always known the answer. staff_unavailable_message is exact and is
+    already the backstop that stops a BOOKING landing on a day off. The gap is that it only
+    runs when a BOOKING line is emitted, and a refusal never emits one. So the verdict is
+    computed up front and handed over as a fact, leaving the model nothing to work out.
+    """
+    biz = info or config_service.get_business_info()
+    if not _conversation_suggests_booking(conversation_history):
+        return None
+    user_text = _conversation_user_text(conversation_history)
+    if not user_text.strip():
+        return None
+    sid = _staff_id_from_spoken_text(user_text, biz)
+    if not sid:
+        return None
+    srow = next(
+        (s for s in (biz.get("staff") or []) if (s.get("id") or "").strip() == sid), None
+    )
+    if not srow:
+        return None
+    date_str = _requested_date_from_spoken_text(user_text, biz)
+    if not date_str:
+        return None
+
+    import staff_schedule
+
+    name = (srow.get("name") or "").strip() or "That stylist"
+    weekday = date.fromisoformat(date_str).strftime("%A")
+    unavailable = staff_schedule.staff_unavailable_message(srow, date_str, "")
+    if unavailable:
+        return (
+            "AVAILABILITY FACT — computed from the roster, authoritative, do NOT contradict "
+            f"it or reason about it yourself: {name} does NOT work on {weekday} {date_str}. "
+            f"Tell the caller {name} isn't available that day, name the days {name} does "
+            "work, and offer one of those or another stylist. Do not book that day."
+        )
+    return (
+        "AVAILABILITY FACT — computed from the roster, authoritative, do NOT contradict it "
+        f"or reason about it yourself: {name} DOES work on {weekday} {date_str}. Do NOT tell "
+        f"the caller {name} is unavailable, off, or does not work that day, and do not list "
+        f"{name}'s other days. Continue with the booking for {weekday} unless the caller "
+        "changes it themselves."
+    )
+
+
 # Structural patterns for "the model is claiming a booking exists". Regex (not literal
 # substrings) so paraphrases and tense changes can't slip through — a literal blocklist is
 # exactly how "Perfect, I've got everything I need." reached a live customer demo while
@@ -2515,6 +2614,15 @@ async def generate_response_async(
         recap = booking_details_recap_note(call_data["conversation_history"])
         if recap:
             messages.append({"role": "system", "content": recap})
+        availability = stylist_day_availability_note(call_data["conversation_history"])
+        if availability:
+            messages.append({"role": "system", "content": availability})
+            voice_info(
+                "stylist_availability_fact_injected",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                available="does NOT work" not in availability,
+            )
         nudge = _voice_booking_nudge_message(
             call_data["conversation_history"],
             appointment_created=bool(call_data.get("appointment_created")),
