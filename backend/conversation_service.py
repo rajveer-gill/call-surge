@@ -699,12 +699,39 @@ _COMMITTED_BOOKING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Request-mode phrasing. Every pattern above hunts for BOOKING vocabulary — booked, all
+# set, scheduled, put you down — and in request mode the model does not use any of it,
+# because we taught it not to. It says "request" instead, which is the whole point of
+# request mode and was Lana's clearest ask. So the guard had a hole shaped exactly like
+# our own wording change, and a caller was told this on 2026-09-02 with nothing filed:
+#
+#   "Great! I've put in your request for a Shampoo & Haircut with Terrance on
+#    September 6th at 10:00 AM. The salon will confirm the time with you soon."
+#
+# Tense is what separates the lie from the disclaimer, so these match only a request
+# already placed. "I'm putting in a request for you rather than booking it" opens nearly
+# every reply and must never fire, nor must "I'll put in the request for today at 4 PM" —
+# both are promises about what happens next, which is exactly what should be said before
+# the BOOKING line exists.
+_FALSE_REQUEST_CLAIM_RE = re.compile(
+    "|".join(
+        (
+            r"\b(?:i|we)\s*(?:'ve|\s+have)\s+(?:already\s+)?"
+            r"(?:put\s+in|sent|submitted|filed|placed|entered|logged)\s+"
+            r"(?:your|the|a|this)\s+request\b",
+            r"\byour\s+request\s+(?:is\s+(?:in|placed|submitted|logged)\b"
+            r"|has\s+been\s+(?:put\s+in|sent|submitted|filed|placed|logged)\b)",
+        )
+    ),
+    re.IGNORECASE,
+)
+
 
 def _ai_implies_committed_booking(ai_text: str) -> bool:
     t = (ai_text or "").lower()
     if not t:
         return False
-    if _COMMITTED_BOOKING_RE.search(t):
+    if _COMMITTED_BOOKING_RE.search(t) or _FALSE_REQUEST_CLAIM_RE.search(t):
         return True
     return any(
         p in t
