@@ -1437,6 +1437,53 @@ def _validate_booking_requirements(
         if closed_msg:
             return False, closed_msg, staff_id, None
 
+        # The shop's own opening hours for that weekday. Puneet booked 10 AM on a Sunday
+        # the salon opens at 11 — the stylist's own hours allowed it and nothing else
+        # looked. Enforced ONLY on weekdays whose hours were read off the tenant's text
+        # (see parse_hours_to_weekly_explicit): a store that never filled the field in
+        # falls back to Mon-Fri 9-5 weekend-closed, and refusing on that would turn away
+        # every weekend caller it has.
+        try:
+            from business_hours import day_slot_for_date_explicit, is_open_247
+
+            target = date.fromisoformat(booking_date)
+            day_slot, hours_are_explicit = day_slot_for_date_explicit(biz, target)
+            slot_time = normalize_booking_time((booking.get("time") or "").strip()) or ""
+            if hours_are_explicit and not is_open_247(day_slot):
+                weekday = staff_schedule.DAY_LABELS[staff_schedule.DAY_ORDER[target.weekday()]]
+                if day_slot.closed:
+                    return (
+                        False,
+                        f"We're closed on {weekday}s. Would another day work for you?",
+                        staff_id,
+                        None,
+                    )
+                if slot_time:
+                    from business_hours import time_to_minutes
+
+                    t = time_to_minutes(slot_time)
+                    open_m = time_to_minutes(day_slot.open)
+                    close_m = time_to_minutes(day_slot.close)
+                    # -1 means unparseable; never refuse on a time we could not read.
+                    if (
+                        t >= 0
+                        and open_m >= 0
+                        and close_m >= 0
+                        and not (open_m <= t < close_m)
+                    ):
+                        opens = booking_service._hhmm_to_ampm(day_slot.open)
+                        closes = booking_service._hhmm_to_ampm(day_slot.close)
+                        return (
+                            False,
+                            f"On {weekday}s we're open {opens} to {closes}, so "
+                            f"{booking_service._hhmm_to_ampm(slot_time)} is outside our "
+                            "hours. Would a time in there work for you?",
+                            staff_id,
+                            None,
+                        )
+        except ValueError:
+            pass
+
     ctx = booking_context_from_business(biz)
     service_choices = ", ".join(
         (s.get("name") or "").strip()

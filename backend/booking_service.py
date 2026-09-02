@@ -20,7 +20,7 @@ import config_service
 import database
 import runtime
 import json
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timezone
 from observability import system_debug, system_info
 
 logger = logging.getLogger("nuvatra")
@@ -582,6 +582,20 @@ def _slot_overlaps(
     b_end = b_start + duration_b
     return a_start < b_end and b_start < a_end
 
+def _weekday_label_for_date(date_str: str) -> str:
+    """"Thursday " for an ISO date, or "" when it will not parse.
+
+    A bare 2026-09-03 makes the model work out the weekday itself, and it gets that wrong:
+    a 2 PM hold on Thursday was read back to a caller as Friday being unavailable at 2 PM.
+    Naming the day removes the inference, the same reason the booking rules ship a
+    DATE REFERENCE list rather than trusting the model to map dates to weekdays.
+    """
+    try:
+        return _date.fromisoformat((date_str or "").strip()).strftime("%A") + " "
+    except (ValueError, TypeError):
+        return ""
+
+
 def _slot_blocking_details(
     date: str,
     time: str,
@@ -809,7 +823,7 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
             label = _staff_label_for_slot_key(sk, id_to_name)
             times_display = [_hhmm_to_ampm(x) for x in sorted(set(times))]
             by_stylist_booked.setdefault(label, []).append(
-                f"{dt} at {', '.join(times_display)}"
+                f"{_weekday_label_for_date(dt)}{dt} at {', '.join(times_display)}"
             )
         if by_stylist_booked:
             booked_lines = [
@@ -817,7 +831,9 @@ def get_booked_slots_prompt_text(days_ahead: int = 90, skip_cache: bool = False)
                 for label, lines in sorted(by_stylist_booked.items())
             ]
             parts.append(
-                "Booked slots by stylist (each calendar is separate—do not merge across people): "
+                "Booked slots by stylist. Each calendar is separate—do not merge across "
+                "people, and do not carry a booked time from one DATE to another: a slot "
+                "listed here blocks ONLY the exact weekday and date it is listed under: "
                 + " | ".join(booked_lines)
             )
         roster_with_ids = [(sid, name) for sid, name in roster if sid]

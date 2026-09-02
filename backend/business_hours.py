@@ -111,16 +111,29 @@ def _extract_two_times(fragment: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def parse_hours_to_weekly(text: str) -> List[DaySlot]:
+def parse_hours_to_weekly_explicit(text: str) -> tuple[List[DaySlot], set[int]]:
+    """Weekly schedule plus the weekdays it was actually read off the tenant's own text.
+
+    The schedule alone cannot be trusted to refuse anyone. Unset or unparseable hours fall
+    back to Mon-Fri 9-5 with the weekend closed, so enforcing it blindly would start turning
+    away every Saturday and Sunday caller at any store that never filled the field in — a
+    wrong refusal, which is the worst thing this system does: it loses a customer and looks
+    exactly like a caller who changed their mind.
+
+    So the second return value names the weekdays whose hours came from the text and may be
+    enforced. Every other day is a guess and must only be used for phrasing, never to say no.
+    The loose fallback (bare times, no day labels) is deliberately NOT explicit — the times
+    are real but "Mon-Fri" is our assumption, not the tenant's statement.
+    """
     raw = (text or "").strip()
     if not raw:
-        return default_weekly_schedule()
+        return default_weekly_schedule(), set()
     lower = raw.lower()
     if re.search(r"\b24\s*/\s*7\b", lower) or re.search(r"\b24-7\b", lower):
-        return [DaySlot(False, "00:00", "23:59") for _ in range(7)]
+        return [DaySlot(False, "00:00", "23:59") for _ in range(7)], set(range(7))
 
     sched = [DaySlot(True, DEFAULT_OPEN, DEFAULT_CLOSE) for _ in range(7)]
-    matched = False
+    explicit: set[int] = set()
     for line in raw.splitlines():
         for piece in line.split(";"):
             piece = piece.strip()
@@ -136,23 +149,27 @@ def parse_hours_to_weekly(text: str) -> List[DaySlot]:
             if re.match(r"^closed\b", right, re.I):
                 for d in days:
                     sched[d] = DaySlot(True, DEFAULT_OPEN, DEFAULT_CLOSE)
-                matched = True
+                    explicit.add(d)
                 continue
             times = _extract_two_times(right)
             if not times:
                 continue
             for d in days:
                 sched[d] = DaySlot(False, times[0], times[1])
-            matched = True
+                explicit.add(d)
 
-    if not matched:
+    if not explicit:
         loose = _extract_two_times(raw)
         if loose:
             for d in range(5):
                 sched[d] = DaySlot(False, loose[0], loose[1])
-            return sched
-        return default_weekly_schedule()
-    return sched
+            return sched, set()
+        return default_weekly_schedule(), set()
+    return sched, explicit
+
+
+def parse_hours_to_weekly(text: str) -> List[DaySlot]:
+    return parse_hours_to_weekly_explicit(text)[0]
 
 
 def business_timezone(info: Optional[dict] = None) -> ZoneInfo:
@@ -190,6 +207,16 @@ def business_local_now(
 def day_slot_for_date(info: dict, target_date: date) -> DaySlot:
     schedule = parse_hours_to_weekly(info.get("hours") or "")
     return schedule[target_date.weekday()]
+
+
+def day_slot_for_date_explicit(info: dict, target_date: date) -> tuple[DaySlot, bool]:
+    """The day's hours, and whether they are the tenant's own words rather than a default.
+
+    Only act on the slot when the flag is True — see parse_hours_to_weekly_explicit.
+    """
+    schedule, explicit = parse_hours_to_weekly_explicit(info.get("hours") or "")
+    idx = target_date.weekday()
+    return schedule[idx], idx in explicit
 
 
 def is_open_247(slot: DaySlot) -> bool:
