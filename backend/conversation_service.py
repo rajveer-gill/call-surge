@@ -1561,6 +1561,52 @@ def _validate_booking_requirements(
             if unavailable:
                 return False, unavailable, staff_id, canonical_reason
 
+    # Backstop: never file a request for a slot we already know is taken.
+    #
+    # The model is handed the booked slots in its prompt and usually declines them on its
+    # own. On Lana's 5 PM call it declined in prose — "Melissa is not available at 5 PM,
+    # she has openings at 9, 10, 11..." — and emitted a BOOKING line for that exact slot
+    # on the same turn. Nothing here stopped it, so the request was filed and the call
+    # ended on the confirmation, cutting her off mid-question. Rejecting here speaks the
+    # reason and leaves the call open instead, which is what she was asking for.
+    #
+    # This runs for external-booking stores too. Their real calendar lives elsewhere, so
+    # what we hold is only ever partial — which is exactly why it may reject a slot we
+    # positively know is taken and nothing else. Absent data blocks nothing, so a store
+    # that imports no appointments behaves as before and no caller is refused a time that
+    # was in fact free.
+    if booking_date and staff_id:
+        slot_time = normalize_booking_time((booking.get("time") or "").strip()) or ""
+        if slot_time:
+            duration = booking_service._booking_duration_minutes(booking, biz)
+            if not booking_service.is_slot_available(
+                booking_date, slot_time, duration, staff_id
+            ):
+                import staff_schedule
+
+                srow = next(
+                    (s for s in staff_rows if str(s.get("id")) == str(staff_id)), None
+                )
+                who = ((srow or {}).get("name") or "").strip() or "That stylist"
+                system_info(
+                    "booking_rejected_slot_taken",
+                    date=booking_date,
+                    time=slot_time,
+                    staff_id=staff_id,
+                    external=config_service.is_external_booking(biz),
+                )
+                return (
+                    False,
+                    (
+                        f"{who} already has an appointment at "
+                        f"{booking_service._hhmm_to_ampm(slot_time)} on "
+                        f"{staff_schedule.friendly_date(booking_date)}. "
+                        "Would you like another time, or a different stylist?"
+                    ),
+                    staff_id,
+                    canonical_reason,
+                )
+
     return True, None, staff_id, canonical_reason
 
 
