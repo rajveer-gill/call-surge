@@ -26,6 +26,14 @@ from voice.utterance import apply_caller_utterance
 
 _log = logging.getLogger("nuvatra")
 
+# Longest a single turn may be held open by speech that keeps arriving. Ongoing words
+# extend the debounce (see _UtteranceCollector.on_partial) so a caller is not cut off
+# mid-sentence, and this is the backstop on that: someone who talks without pausing, or a
+# television behind them, must not keep the receptionist listening indefinitely. Twenty
+# seconds is far longer than any real booking sentence and far shorter than a caller would
+# tolerate waiting.
+MAX_UTTERANCE_HOLD_SEC = 20.0
+
 
 def _resolve_stream_base_url(row: dict[str, Any], call_sid: str) -> tuple[str, str]:
     """
@@ -69,6 +77,10 @@ class _UtteranceCollector:
         self.last_confidence = 0.0
         self._debounce_task: Optional[asyncio.Task[None]] = None
         self._committed = False
+        # Ceiling on how long ongoing speech may hold the turn open. Without it a caller
+        # who never pauses — or a room with a television in it — keeps the window alive
+        # forever and the AI never answers.
+        self._first_scheduled_at: Optional[float] = None
 
     def _cancel_debounce(self) -> None:
         if self._debounce_task and not self._debounce_task.done():
@@ -76,11 +88,32 @@ class _UtteranceCollector:
         self._debounce_task = None
 
     def on_partial(self, text: str, confidence: float) -> None:
+        """Words still arriving. Keep the turn open — the caller has not finished.
+
+        This used to update the text and leave the timer alone, which made the debounce
+        mean "commit N ms after the last FINAL" rather than "commit after N ms of
+        silence". Interim results stream continuously while someone is talking and were
+        all ignored, so a caller was cut off whenever they spoke for longer than the
+        debounce without Deepgram happening to emit a final:
+
+            00:55:49  caller_said  "Hi. This is Raj."
+
+        — the rest of that sentence was still being spoken. It also inverted the
+        endpointing setting: raising it made Deepgram emit finals LESS often, which left
+        the clock running out mid-sentence and cut callers off sooner, not later.
+
+        Only a changed transcript extends the window. Deepgram repeats the same interim
+        while it is still deciding, and treating those as fresh speech would hold the
+        line open through silence.
+        """
         if self._committed:
             return
         if text:
+            changed = text != self.last_interim
             self.last_interim = text
             self.last_confidence = max(self.last_confidence, confidence)
+            if changed:
+                self._schedule_commit()
 
     def on_final_segment(self, text: str, confidence: float) -> None:
         if self._committed:
@@ -88,6 +121,10 @@ class _UtteranceCollector:
         t = (text or "").strip()
         if t:
             self.final_segments.append(t)
+            # This final IS the interim it grew out of. Clearing keeps last_interim
+            # meaning "speech since the last final", so transcript() can append it
+            # without repeating words already committed to a segment.
+            self.last_interim = ""
             self.last_confidence = max(self.last_confidence, confidence)
             self._schedule_commit()
         elif self.final_segments or (self.last_interim or "").strip():
@@ -96,6 +133,15 @@ class _UtteranceCollector:
 
     def _schedule_commit(self) -> None:
         if self._committed:
+            return
+        now = time.monotonic()
+        if self._first_scheduled_at is None:
+            self._first_scheduled_at = now
+        elif now - self._first_scheduled_at >= MAX_UTTERANCE_HOLD_SEC:
+            # Held open long enough. Take what we have rather than listen forever.
+            voice_info("utterance_hold_capped", call_sid=self.call_sid)
+            self._cancel_debounce()
+            self._debounce_task = asyncio.create_task(self.commit_now())
             return
         self._cancel_debounce()
         self._debounce_task = asyncio.create_task(self._debounced_commit())
@@ -108,10 +154,22 @@ class _UtteranceCollector:
             return
 
     def transcript(self) -> tuple[str, float]:
-        joined = " ".join(self.final_segments).strip()
-        if joined:
-            return joined, self.last_confidence
-        return (self.last_interim or "").strip(), self.last_confidence
+        """Everything heard this turn: the finals, plus whatever has arrived since the last one.
+
+        The trailing interim used to be dropped whenever any final existed, so holding the
+        turn open for a caller still speaking gained nothing — the words they were saying
+        were collected and then thrown away at commit. "Hi. This is Raj." was committed
+        while "I'd like to book a shampoo and haircut with Terrance on Thursday at 11AM"
+        sat in last_interim.
+
+        on_final_segment clears last_interim, so it only ever holds speech that no final
+        has superseded and the two cannot duplicate each other.
+        """
+        parts = [*self.final_segments]
+        tail = (self.last_interim or "").strip()
+        if tail:
+            parts.append(tail)
+        return " ".join(p for p in parts if p).strip(), self.last_confidence
 
     async def commit_now(self) -> None:
         if self._committed:
