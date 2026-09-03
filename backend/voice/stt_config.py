@@ -53,6 +53,32 @@ def utterance_finalize_debounce_ms() -> int:
         return 800
 
 
+def deepgram_endpointing_ms() -> int:
+    """Silence (ms) after which DEEPGRAM itself declares the utterance finished.
+
+    This is the one that actually decides where a caller's sentence ends, and it sits
+    UPSTREAM of utterance_finalize_debounce_ms — by the time our debounce is consulted,
+    Deepgram has already cut the transcript and sent it. Raising ours while this stayed at
+    300 changed nothing, which is how it was found:
+
+        00:04:22  "Hi. This is Raj. I'd like to book a shampoo and a haircut"
+        00:04:32  "with Terrence on Thursday at 11AM."
+
+    One sentence, split at the breath before "with", answered as two turns — so the
+    receptionist asked which stylist he wanted while the answer was still in flight. That
+    is what Lana reported as it only taking the first part of what she said.
+
+    300ms is shorter than an ordinary pause mid-sentence. Kept as the default so nothing
+    changes for anyone without a deliberate env set; raise it per environment and revert
+    instantly if replies start feeling slow, since every extra millisecond here is silence
+    the caller waits through before the AI answers.
+    """
+    try:
+        return int(os.getenv("VOICE_DEEPGRAM_ENDPOINTING_MS", "300"))
+    except ValueError:
+        return 300
+
+
 def deepgram_max_frame_bytes() -> int:
     try:
         return int(os.getenv("VOICE_DEEPGRAM_MAX_FRAME_BYTES", "8192"))

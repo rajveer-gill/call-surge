@@ -7,23 +7,32 @@ from typing import Any, Optional
 
 import websockets
 
-from voice.stt_config import deepgram_api_key
+from voice.stt_config import deepgram_api_key, deepgram_endpointing_ms
 
 # Twilio PSTN inbound is typically mu-law 8k mono — Deepgram accepts this encoding directly.
 DEEPGRAM_MODEL = "nova-3"
-DEEPGRAM_LISTEN_QUERY = (
-    f"model={DEEPGRAM_MODEL}"
-    "&encoding=mulaw"
-    "&sample_rate=8000"
-    "&channels=1"
-    "&endpointing=300"
-    "&smart_format=true"
-    "&interim_results=true"
-)
+
+
+def deepgram_listen_query() -> str:
+    """Built per connection so endpointing can be tuned by env without a deploy.
+
+    endpointing is how long Deepgram waits in silence before calling the utterance done.
+    It decides where a caller's sentence is cut, and everything downstream — including
+    utterance_finalize_debounce_ms — only sees what it has already decided.
+    """
+    return (
+        f"model={DEEPGRAM_MODEL}"
+        "&encoding=mulaw"
+        "&sample_rate=8000"
+        "&channels=1"
+        f"&endpointing={deepgram_endpointing_ms()}"
+        "&smart_format=true"
+        "&interim_results=true"
+    )
 
 
 def deepgram_listen_uri() -> str:
-    return f"wss://api.deepgram.com/v1/listen?{DEEPGRAM_LISTEN_QUERY}"
+    return f"wss://api.deepgram.com/v1/listen?{deepgram_listen_query()}"
 
 
 def parse_deepgram_transcript_message(text: str) -> Optional[tuple[str, bool, float]]:
