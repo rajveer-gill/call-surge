@@ -129,6 +129,65 @@ def _phone_to_e164(phone: str) -> Optional[str]:
 # and the caller needs to be told something true instead of "I've texted you".
 NON_TEXTABLE_ERROR_CODES = frozenset({21211, 21408, 21612, 21614})
 
+# Line types that cannot receive SMS. Only a landline: plenty of VoIP numbers (Google
+# Voice and most softphones) text perfectly well, and refusing to text those would be a
+# far worse bug than the one this fixes — a caller on a mobile silently getting nothing.
+_NON_TEXTABLE_LINE_TYPES = frozenset({"landline"})
+
+# Line type never changes for a number, so one lookup per number is enough. Kept in
+# process: it costs a fraction of a cent to refill after a deploy and saves the lookup on
+# every repeat caller, which in a salon is most of them.
+_line_type_cache: dict[str, Optional[str]] = {}
+
+
+def line_type_lookup_enabled() -> bool:
+    return (os.getenv("VOICE_SMS_LINE_TYPE_LOOKUP", "1") or "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def phone_line_type(e164: str) -> Optional[str]:
+    """"mobile" / "landline" / "voip" etc. from Twilio Lookup, or None if we could not tell.
+
+    Twilio does NOT reject a landline when the message is created — it accepts it, returns
+    a message SID, and marks it undelivered a second later with error 30005. A stylist
+    called Gig Harbor from the salon phone on 2026-09-04, was told "I've texted you the
+    details", and the text was dead on arrival:
+
+        outbound_twilio_ok  segments=3  success=True  not_textable=False
+        ...then, one second later, status=undelivered error_code=30005
+
+    So NON_TEXTABLE_ERROR_CODES, which only ever sees the synchronous exception, could
+    never catch a real landline. Asking beforehand is the only way to know in time to say
+    something true on the call.
+
+    Returns None on any failure — unknown must mean "go ahead and text", never "skip".
+    Silently withholding a confirmation from a working mobile is the worse outcome.
+    """
+    num = (e164 or "").strip()
+    if not num:
+        return None
+    if num in _line_type_cache:
+        return _line_type_cache[num]
+    result: Optional[str] = None
+    try:
+        client = runtime.twilio_client
+        if client is not None:
+            info = client.lookups.v2.phone_numbers(num).fetch(
+                fields="line_type_intelligence"
+            )
+            lti = getattr(info, "line_type_intelligence", None) or {}
+            raw = (lti.get("type") if isinstance(lti, dict) else None) or ""
+            result = raw.strip().lower() or None
+    except Exception as e:
+        sms_debug("line_type_lookup_failed", to_masked=mask_phone_e164(num), error=str(e)[:120])
+        result = None
+    _line_type_cache[num] = result
+    return result
+
 
 def _twilio_error_code(err: Exception) -> Optional[int]:
     code = getattr(err, "code", None)
@@ -198,6 +257,22 @@ def send_sms(
                 )
                 return False
     to_masked = mask_phone_e164(e164)
+    # A landline is accepted by Twilio and quietly dropped a second later, so the only
+    # place to find out in time is here, before we promise the caller a text they will
+    # never get. Unknown means send: see phone_line_type.
+    if line_type_lookup_enabled():
+        line_type = phone_line_type(e164)
+        if line_type in _NON_TEXTABLE_LINE_TYPES:
+            if detail_out is not None:
+                detail_out["not_textable"] = True
+                detail_out["line_type"] = line_type
+            sms_info(
+                "outbound_not_textable",
+                reason="line_type",
+                line_type=line_type,
+                to_masked=to_masked,
+            )
+            return False
     # For logs/audit: never leak the raw service SID; show the From or a service marker.
     sender_label = mask_phone_e164(from_num) if from_num else (f"msgsvc:…{msid[-4:]}" if msid else "")
     via = "from_number" if from_num else ("messaging_service" if msid else "none")
