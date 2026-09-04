@@ -1163,6 +1163,67 @@ def admin_delete_tenant(
     }
 
 
+def _billing_subscription_for(tenant: dict) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+    """The Stripe subscription that actually bills this store: (sub_id, scope, org).
+
+    A store that checked out on its own carries the subscription id itself (scope
+    "tenant"). Since every account became an org, a store is normally paid for by its
+    group's single subscription, which lives only on the org row (scope "org") — the
+    store's own column stays empty forever. Looking only at the store's column therefore
+    says "nothing is billing them" about a customer who is being billed, which is how
+    an extended trial once ended in a charge anyway.
+    """
+    own = (tenant.get("stripe_subscription_id") or "").strip()
+    if own:
+        return own, "tenant", None
+    org_id = tenant.get("org_id")
+    if not org_id:
+        return None, None, None
+    try:
+        org = database.db_org_get_by_id(str(org_id))
+    except Exception as e:
+        print(f"[Admin] org billing lookup failed org={org_id}: {type(e).__name__}")
+        return None, None, None
+    if not org:
+        return None, None, None
+    org_sub = (org.get("stripe_subscription_id") or "").strip()
+    if not org_sub:
+        return None, "org", org
+    return org_sub, "org", org
+
+
+def _mirror_grant_to_org(
+    tenant: dict,
+    *,
+    subscription_status: Optional[str] = None,
+    trial_ends_at: Optional[datetime] = None,
+    billing_exempt_until: Optional[datetime] = None,
+) -> bool:
+    """Write an admin grant onto the store's org row as well.
+
+    Access and the dashboard's trial banner are read from the org when the store can't
+    stand on its own, and Stripe bills the org, so a grant recorded only on the store
+    leaves the org saying "active, trial over" — no countdown, and a state that
+    disagrees with what we just told Stripe. The org and every store in it share one
+    bill, so deferring it is inherently a group-wide grant.
+    """
+    org_id = tenant.get("org_id")
+    if not org_id:
+        return False
+    try:
+        return bool(
+            database.db_org_update_subscription(
+                str(org_id),
+                subscription_status=subscription_status,
+                trial_ends_at=trial_ends_at,
+                billing_exempt_until=billing_exempt_until,
+            )
+        )
+    except Exception as e:
+        print(f"[Admin] org grant mirror failed org={org_id}: {type(e).__name__}")
+        return False
+
+
 def _defer_stripe_billing(tenant: dict, until: datetime) -> dict:
     """Push the subscription's trial_end in Stripe so it stops invoicing until `until`.
 
@@ -1172,17 +1233,21 @@ def _defer_stripe_billing(tenant: dict, until: datetime) -> dict:
     trial_end is in the future it does not invoice, and it reverts to normal billing
     afterwards without anything else to remember.
 
-    Returns {applied, reason, error} and never raises. A Stripe failure must never be
-    reported as success — "they won't be charged" is the entire claim being made.
+    The subscription is resolved through the org when the store has none of its own
+    (see _billing_subscription_for); `scope` in the result says which one was moved.
+
+    Returns {applied, reason, scope, error} and never raises. A Stripe failure must
+    never be reported as success — "they won't be charged" is the entire claim being made.
     """
-    sub_id = (tenant.get("stripe_subscription_id") or "").strip()
+    sub_id, scope, _org = _billing_subscription_for(tenant)
     if not sub_id:
-        # Nothing is billing them; the database grant is the whole story.
-        return {"applied": False, "reason": "no_subscription", "error": None}
+        # Nothing is billing them (neither the store nor its group); the database
+        # grant is the whole story.
+        return {"applied": False, "reason": "no_subscription", "scope": scope, "error": None}
     key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not key:
         return {
-            "applied": False, "reason": "not_configured",
+            "applied": False, "reason": "not_configured", "scope": scope,
             "error": "STRIPE_SECRET_KEY is not set on this backend.",
         }
     try:
@@ -1196,11 +1261,11 @@ def _defer_stripe_billing(tenant: dict, until: datetime) -> dict:
             # invoice for the part-period; we are deferring billing, not refunding.
             proration_behavior="none",
         )
-        return {"applied": True, "reason": "trial_end_set", "error": None}
+        return {"applied": True, "reason": "trial_end_set", "scope": scope, "error": None}
     except Exception as e:
         print(f"[Admin] stripe trial_end update failed sub={sub_id}: {type(e).__name__}: {e}")
         return {
-            "applied": False, "reason": "stripe_error",
+            "applied": False, "reason": "stripe_error", "scope": scope,
             "error": f"{type(e).__name__}: {e}"[:200],
         }
 
@@ -1225,15 +1290,22 @@ def admin_tenant_stripe_status(
     tenant = database.db_tenant_get_by_id(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    sub_id = (tenant.get("stripe_subscription_id") or "").strip()
-    ours = (tenant.get("subscription_status") or "").strip() or None
+    sub_id, scope, org = _billing_subscription_for(tenant)
+    # Compare Stripe against the row it actually mirrors: the org's when the group pays.
+    billed_row = org if (scope == "org" and org) else tenant
+    ours = (billed_row.get("subscription_status") or "").strip() or None
     if not sub_id:
         return {
             "has_subscription": False,
+            "scope": scope,
             "ours": ours,
             "stripe": None,
             "in_sync": None,
-            "message": "No Stripe subscription on file for this tenant.",
+            "message": (
+                "No Stripe subscription on file for this store or its group."
+                if scope == "org"
+                else "No Stripe subscription on file for this tenant."
+            ),
         }
     try:
         import stripe as _stripe
@@ -1261,6 +1333,7 @@ def admin_tenant_stripe_status(
     live = str(getattr(sub, "status", "") or "") or None
     return {
         "has_subscription": True,
+        "scope": scope,
         "subscription_id": sub_id,
         "ours": ours,
         "stripe": live,
@@ -1324,6 +1397,9 @@ def admin_tenant_billing_exempt(
                     },
                     request=request,
                 )
+                _mirror_grant_to_org(
+                    tenant, subscription_status="trialing", trial_ends_at=new_ends
+                )
                 stripe_result = _defer_stripe_billing(tenant, new_ends)
                 return {
                     "success": True,
@@ -1356,6 +1432,7 @@ def admin_tenant_billing_exempt(
                 },
                 request=request,
             )
+            _mirror_grant_to_org(tenant, billing_exempt_until=exempt_until)
             stripe_result = _defer_stripe_billing(tenant, exempt_until)
             return {
                 "success": True,
@@ -1382,6 +1459,7 @@ def admin_tenant_billing_exempt(
                     },
                     request=request,
                 )
+                _mirror_grant_to_org(tenant, billing_exempt_until=exempt_dt)
                 stripe_result = _defer_stripe_billing(tenant, exempt_dt)
                 return {
                     "success": True,

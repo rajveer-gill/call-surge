@@ -150,10 +150,23 @@ export function useTenantAdmin({
   /** What actually happened at Stripe, in words. The grant is meaningless to a paying
    *  customer if Stripe kept billing them, so a failure here must never be swallowed
    *  into a cheerful "done". */
-  const stripeOutcome = (r?: { applied?: boolean; reason?: string; error?: string | null }) => {
+  const stripeOutcome = (r?: {
+    applied?: boolean
+    reason?: string
+    scope?: 'tenant' | 'org' | null
+    error?: string | null
+  }) => {
     if (!r) return ''
-    if (r.applied) return ' Stripe billing deferred to the same date.'
-    if (r.reason === 'no_subscription') return ' No Stripe subscription — nothing was billing them.'
+    if (r.applied) {
+      return r.scope === 'org'
+        ? " Stripe billing deferred to the same date on the group's subscription (it covers every store in the group)."
+        : ' Stripe billing deferred to the same date.'
+    }
+    if (r.reason === 'no_subscription') {
+      return r.scope === 'org'
+        ? ' No Stripe subscription on this store or its group — nothing is billing them.'
+        : ' No Stripe subscription — nothing was billing them.'
+    }
     return ` WARNING: Stripe was NOT updated (${r.error || 'unknown error'}) — they will still be charged. Cancel or pause it in Stripe.`
   }
 

@@ -27,6 +27,8 @@ export interface Tenant {
 
 export type StripeStatus = {
   has_subscription: boolean
+  /** Whose subscription this is: the store's own, or the group's that pays for it. */
+  scope?: 'tenant' | 'org' | null
   ours?: string | null
   stripe?: string | null
   in_sync?: boolean | null

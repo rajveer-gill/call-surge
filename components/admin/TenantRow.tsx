@@ -242,10 +242,10 @@ export function TenantRow({ t, ctx }: { t: Tenant; ctx: TenantRowCtx }) {
               >
                 {exempting === t.id ? 'Applying…' : 'Apply'}
               </button>
-              {/* These controls grant access in Call Surge and do not touch
-                  Stripe. Extending a trial for someone with a live
-                  subscription still lets Stripe charge them on renewal —
-                  which is exactly what happened once, unnoticed. */}
+              {/* These controls grant access in Call Surge AND push the Stripe
+                  trial — on the group's subscription when the group pays, since
+                  the store's own column is empty then. Both times that was
+                  missed, a customer with an "extended" trial was charged. */}
               <button
                 type="button"
                 onClick={() => void checkStripe(t.id)}
@@ -301,7 +301,8 @@ export function TenantRow({ t, ctx }: { t: Tenant; ctx: TenantRowCtx }) {
                 <>
                   <span>
                     Stripe says <strong>{stripeStatus[t.id].stripe}</strong>; we have{' '}
-                    <strong>{stripeStatus[t.id].ours || 'nothing'}</strong>.
+                    <strong>{stripeStatus[t.id].ours || 'nothing'}</strong>
+                    {stripeStatus[t.id].scope === 'org' && " (the group's subscription)"}.
                   </span>
                   {stripeStatus[t.id].in_sync === false && (
                     <span className="ml-1 font-medium">
