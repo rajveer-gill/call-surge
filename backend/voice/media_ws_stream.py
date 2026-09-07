@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any, Optional
@@ -51,11 +52,31 @@ _FRAME_SEC = 0.02  # 20 ms of audio per mulaw frame.
 _SEND_LEAD_SEC = 0.6
 _REPLY_WAIT_SEC = 25.0  # max wait for the brain to produce ai_text before giving up the turn.
 _HANDSHAKE_SEC = 25.0
-# Half-duplex: stop feeding caller audio to STT while the AI is speaking (+ this guard after
-# playback ends) so the AI's own voice — echoed back on speakerphone / the inbound track —
-# isn't transcribed as caller speech (which caused false "barge-in" self-interruptions).
-# True barge-in while speaking needs acoustic echo cancellation (future work).
+# Half-duplex: caller audio is not fed to STT *live* while the AI is speaking (+ this guard
+# after playback ends), so the AI's own voice — echoed back on speakerphone — is not
+# transcribed mid-reply, which caused false "barge-in" self-interruptions. The audio is no
+# longer discarded, only delayed: see _MAX_TALKOVER_SEC below. Stopping the reply the moment
+# a caller speaks still needs echo cancellation, or the script comparison below applied live.
 _LISTEN_GUARD_SEC = 0.5
+# A caller who talks over the AI used to be thrown away. Their audio is now held while the
+# reply plays and handed to Deepgram the moment it finishes, so the sentence they started
+# mid-reply arrives whole instead of as whatever fragment landed after the last word.
+#
+# From Lana's call on 2026-09-04, her side of a four-minute booking:
+#     "Oh,"   "highlight."   "Different stylist."
+# Not a terse caller — the tail ends of sentences whose beginnings were dropped on the
+# floor while Ava was still speaking.
+#
+# This does NOT stop the reply. The AI still finishes its sentence; it just no longer
+# goes deaf while doing so. Real barge-in is a separate change.
+_MAX_TALKOVER_SEC = 20.0
+_MAX_TALKOVER_FRAMES = int(_MAX_TALKOVER_SEC / _FRAME_SEC)
+# Speakerphone puts the AI's own voice back down the line, and buffering means we now keep
+# it instead of dropping it. A flushed transcript that is mostly our own last sentence is
+# that echo, not the caller. Short replies are exempt: "yes" is inside almost any sentence
+# we just said, and discarding it would be far worse than transcribing one echo.
+_ECHO_MIN_WORDS = 4
+_ECHO_OVERLAP = 0.6
 # Deepgram closes a listen stream after ~10s with no audio. While the AI is speaking we gate
 # caller audio (half-duplex), so a reply longer than that window would let Deepgram idle out —
 # and the next caller frame would hit a dead socket. Send a KeepAlive on this cadence during
@@ -89,6 +110,9 @@ class _BidiSession:
         self._interim = ""
         self._conf = 0.0
         self._commit_task: Optional[asyncio.Task[None]] = None
+        # Caller audio captured while the AI was speaking, waiting to be handed over.
+        self._talkover: list[bytes] = []
+        self._last_spoken_text = ""
 
     # ---- outbound websocket messages (Twilio bidirectional protocol) ----
     async def _send(self, obj: dict) -> None:
@@ -142,6 +166,7 @@ class _BidiSession:
         if not text or self._closing:
             return
         self.speaking = True
+        self._last_spoken_text = text
         self.interrupt.clear()
         self._barge_cleared = False
         self._reply_mark = asyncio.Event()
@@ -220,6 +245,44 @@ class _BidiSession:
             await self._send_clear()
             voice_info("bidi_barge_in", call_sid=self.call_sid)
 
+    async def _flush_talkover(self) -> None:
+        """Hand Deepgram everything the caller said while the AI was talking."""
+        frames, self._talkover = self._talkover, []
+        if not frames or not self.dg_ws:
+            return
+        voice_info(
+            "bidi_talkover_flushed",
+            call_sid=self.call_sid,
+            frames=len(frames),
+            capped=len(frames) >= _MAX_TALKOVER_FRAMES,
+        )
+        try:
+            for fr in frames:
+                await self.dg_ws.send(fr)
+            self._last_dg_activity = asyncio.get_running_loop().time()
+        except Exception:
+            voice_warning("bidi_talkover_flush_failed", call_sid=self.call_sid)
+
+    def _looks_like_our_own_echo(self, text: str) -> bool:
+        """True when a transcript is mostly the sentence we just spoke.
+
+        Only reachable because talkover audio is kept: on speakerphone the AI's own voice
+        comes back down the line and would otherwise be fed to the brain as if the caller
+        had said it. Deliberately conservative — a short reply is never treated as echo,
+        because dropping a real "yes, Tuesday" costs a booking and transcribing one echo
+        costs a turn.
+        """
+        said = (self._last_spoken_text or "").lower()
+        if not said:
+            return False
+        words = re.findall(r"[a-z0-9']+", (text or "").lower())
+        if len(words) < _ECHO_MIN_WORDS:
+            return False
+        mine = set(re.findall(r"[a-z0-9']+", said))
+        if not mine:
+            return False
+        return sum(1 for w in words if w in mine) / len(words) >= _ECHO_OVERLAP
+
     # ---- utterance accumulation + debounced commit ----
     def _on_transcript(self, text: str, is_final: bool, conf: float) -> None:
         # STT is gated while speaking (half-duplex), so transcripts here are caller speech,
@@ -250,6 +313,11 @@ class _BidiSession:
         text = " ".join(self._finals).strip() or self._interim.strip()
         conf = self._conf
         self._finals, self._interim, self._conf = [], "", 0.0
+        if text and self._looks_like_our_own_echo(text):
+            voice_info(
+                "bidi_echo_discarded", call_sid=self.call_sid, transcript_len=len(text)
+            )
+            return
         if text:
             await self.utterance_q.put((text, conf))
 
@@ -484,13 +552,19 @@ class _BidiSession:
                 continue
             kind = ev.get("event")
             if kind == "media":
-                # Half-duplex gate: don't feed caller audio to STT while the AI is speaking
-                # (or during the brief guard after), so the AI's echoed voice isn't transcribed.
-                # While gated we send Deepgram a KeepAlive so a long reply can't idle-close it.
+                # Half-duplex gate: caller audio is not fed to STT while the AI is speaking
+                # (or during the brief guard after), so the AI's echoed voice isn't
+                # transcribed live. While gated we send Deepgram a KeepAlive so a long reply
+                # can't idle-close it — and we now KEEP the caller's audio rather than
+                # discarding it, so talking over the AI costs them nothing.
+                payload = twilio_media_payload_bytes(ev)
                 if self.speaking or asyncio.get_running_loop().time() < self._resume_listen_at:
                     await self._keepalive_deepgram()
+                    if payload and len(self._talkover) < _MAX_TALKOVER_FRAMES:
+                        self._talkover.append(payload)
                     continue
-                payload = twilio_media_payload_bytes(ev)
+                if self._talkover:
+                    await self._flush_talkover()
                 if payload and self.dg_ws:
                     try:
                         await self.dg_ws.send(payload)
