@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import re
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
@@ -1941,7 +1942,75 @@ def _create_appointment_from_booking(
         staff_id=staff_key,
         slot_reserved_immediately=reserve_slot_immediately,
     )
+    _email_store_about_request(appointment_data, _business_info, staff_key)
     return appointment_data
+
+
+def _email_store_about_request(
+    apt: dict, biz: dict, staff_key: Optional[str] = None
+) -> None:
+    """Tell the shop a request is waiting, off the call path.
+
+    Until now a request appeared on the dashboard and nothing else happened — whoever was
+    covering the phones had to have the page open to know a customer was waiting. Satya
+    asked about this on 2026-08-27 and it was never settled; with call forwarding live it
+    is the difference between a request being answered and a customer going elsewhere.
+
+    Sent on a daemon thread deliberately. This runs mid-call, moments before the caller
+    hears their confirmation, and an SMTP handshake or a slow Resend call on that path
+    would be dead air on the phone. Nothing here can fail the booking: the request is
+    already written, and a shop with no email address in Settings simply gets nothing.
+    """
+    to_addr = ((biz or {}).get("email") or "").strip()
+    if not to_addr:
+        return
+
+    staff_name = ""
+    for s in (biz or {}).get("staff") or []:
+        if staff_key and str(s.get("id") or "") == str(staff_key):
+            staff_name = (s.get("name") or "").strip()
+            break
+
+    payload = dict(
+        to=to_addr,
+        business_name=(biz.get("public_name") or biz.get("name") or "").strip(),
+        customer_name=(apt.get("name") or "").strip(),
+        customer_phone=(apt.get("phone") or "").strip(),
+        date=staff_schedule_friendly_date(apt.get("date") or ""),
+        time_ampm=booking_service._hhmm_to_ampm(apt.get("time") or "")
+        or (apt.get("time") or ""),
+        service=(apt.get("reason") or "").strip(),
+        stylist=staff_name,
+        dashboard_url=(os.getenv("FRONTEND_URL") or "https://call-surge.com").rstrip("/")
+        + "/dashboard",
+    )
+
+    def _send() -> None:
+        try:
+            import email_notify
+
+            ok = email_notify.notify_store_of_request(**payload)
+            system_info(
+                "new_request_email",
+                apt_id=apt.get("id"),
+                sent=bool(ok),
+                client_id=(apt.get("client_id") or ""),
+            )
+        except Exception as e:  # never surface into the call
+            system_info("new_request_email_failed", apt_id=apt.get("id"), error=str(e)[:120])
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def staff_schedule_friendly_date(date_str: str) -> str:
+    """"Thursday, September 10" — the shop reads this on a phone, not an ISO date."""
+    try:
+        return date.fromisoformat((date_str or "").strip()).strftime("%A, %B %-d")
+    except (ValueError, TypeError):
+        try:
+            return date.fromisoformat((date_str or "").strip()).strftime("%A, %B %d")
+        except (ValueError, TypeError):
+            return (date_str or "").strip()
 
 
 def _send_booking_confirmation_sms(
