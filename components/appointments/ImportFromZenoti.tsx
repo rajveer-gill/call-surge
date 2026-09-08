@@ -10,6 +10,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { ClipboardPaste, Check, AlertTriangle, Loader2, X } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
+import { localDayString } from '@/lib/localDay'
 
 type ParsedRow = {
   customer_name: string
@@ -52,7 +53,7 @@ export function ImportFromZenoti({
 
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
-  const [day, setDay] = useState(() => new Date().toISOString().slice(0, 10))
+  const [day, setDay] = useState(() => localDayString())
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
   const [addingStylists, setAddingStylists] = useState(false)
   const [stylistNote, setStylistNote] = useState<string | null>(null)

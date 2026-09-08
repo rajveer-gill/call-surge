@@ -22,6 +22,7 @@ import {
   type CalendarSlotBounds,
   type WeeklySchedule,
 } from '@/lib/businessHours'
+import { localDayString, shiftDay } from '@/lib/localDay'
 import './appointments/calendar-theme.css'
 
 const LEGEND = [
@@ -46,15 +47,6 @@ function EventContent({ arg }: { arg: EventContentArg }) {
       <span className="truncate text-xs font-semibold">{title}</span>
     </div>
   )
-}
-
-/** Step a YYYY-MM-DD by whole days without going through a timezone. */
-function shiftDay(day: string, delta: number): string {
-  const [y, m, d] = day.split('-').map((n) => parseInt(n, 10))
-  const dt = new Date(y, (m || 1) - 1, d || 1)
-  dt.setDate(dt.getDate() + delta)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`
 }
 
 function addMinutesToIsoLocal(isoStart: string, minutes: number): string {
@@ -103,7 +95,7 @@ export default function AppointmentCalendar({
   // "By stylist" is a different question from the calendar's — not "what is on at 3pm"
   // but "who is free at 3pm" — so it gets its own day rather than sharing the grid's range.
   const [layout, setLayout] = useState<'calendar' | 'stylist'>('calendar')
-  const [stylistDay, setStylistDay] = useState(() => new Date().toISOString().slice(0, 10))
+  const [stylistDay, setStylistDay] = useState(() => localDayString())
   const [loading, setLoading] = useState(true)
   const [selectedApt, setSelectedApt] = useState<Appointment | null>(null)
   const visibleRangeRef = useRef({ from: '', to: '' })
@@ -351,7 +343,7 @@ export default function AppointmentCalendar({
               </button>
               <button
                 type="button"
-                onClick={() => setStylistDay(new Date().toISOString().slice(0, 10))}
+                onClick={() => setStylistDay(localDayString())}
                 className="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-zinc-300 hover:bg-white/5"
               >
                 Today
@@ -409,7 +401,7 @@ export default function AppointmentCalendar({
               const from = arg.startStr.slice(0, 10)
               const endDay = new Date(arg.end)
               endDay.setMilliseconds(endDay.getMilliseconds() - 1)
-              const to = endDay.toISOString().slice(0, 10)
+              const to = localDayString(endDay)
               visibleRangeRef.current = { from, to }
               applySlotBoundsForView(arg.view.type, arg.start)
               load(from, to)
