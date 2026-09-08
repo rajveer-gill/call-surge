@@ -733,6 +733,20 @@ def init_db() -> bool:
                 PRIMARY KEY (client_id, month)
             )
         """)
+        # Per-channel billing guard. overage_processed only says "this tenant/month is
+        # fully done", which is too coarse: if voice bills and SMS then fails, no marker
+        # is written and the next run re-bills voice. One row per channel, written as
+        # soon as that channel's invoice item lands, so a retry resumes instead of
+        # repeating.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS overage_processed_item (
+                client_id TEXT NOT NULL,
+                month TEXT NOT NULL CHECK (month ~ '^\\d{4}-\\d{2}$'),
+                channel TEXT NOT NULL CHECK (channel IN ('voice', 'sms')),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (client_id, month, channel)
+            )
+        """)
         # Dedup guard so a usage-cap alert fires at most once per tenant per month.
         cur.execute("""
             CREATE TABLE IF NOT EXISTS usage_alert_sent (
@@ -2396,6 +2410,7 @@ def db_tenant_delete(tenant_id: str) -> bool:
 # Operational tables keyed by tenant client_id (purge when tenant is removed; snapshot retained for compliance).
 _CLIENT_SCOPED_TABLES = (
     "overage_processed",
+    "overage_processed_item",
     "tenant_usage",
     "sms_automations",
     "leads",
@@ -4428,6 +4443,50 @@ def db_overage_processed_insert(client_id: str, month: str) -> bool:
         return True
     except Exception as e:
         print(f"[DB] Failed to insert overage_processed: {e}")
+        return False
+
+def db_overage_items_billed(client_id: str, month: str) -> set:
+    """Channels ('voice'/'sms') already invoiced for this client/month.
+
+    One query per tenant rather than one per channel — the caller checks both.
+    On a DB error this returns the empty set, which would re-bill; callers must
+    treat a missing connection as a reason to stop, not to charge again.
+    """
+    if not client_id or not month:
+        return set()
+    conn = _get_conn()
+    if not conn:
+        return set()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT channel FROM overage_processed_item WHERE client_id = %s AND month = %s",
+        (client_id, month),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return {r[0] for r in rows}
+
+def db_overage_item_mark_billed(client_id: str, month: str, channel: str) -> bool:
+    """Record that one channel's overage was invoiced. Returns False if the write
+    did not land — the caller has already charged Stripe at that point, so a False
+    here is a real problem to surface, not something to retry blindly."""
+    if not client_id or not month or channel not in ("voice", "sms"):
+        return False
+    conn = _get_conn()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO overage_processed_item (client_id, month, channel) "
+            "VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (client_id, month, channel),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to insert overage_processed_item: {e}")
         return False
 
 def db_usage_alert_exists(client_id: str, month: str) -> bool:

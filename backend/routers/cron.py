@@ -202,32 +202,56 @@ def cron_process_overage(request: Request):
             database.db_overage_processed_insert(cid, prev_month)
             tenants_processed += 1
             continue
-        try:
-            # Bill voice and SMS overage as separate line items. Both are created before
-            # the processed marker so a re-run cannot double-bill either channel.
-            if voice_cents > 0:
+        # Bill voice and SMS as separate line items, each guarded by its own marker
+        # written the moment that item lands. The tenant-wide processed marker is too
+        # coarse to do this job: if voice succeeded and SMS then raised, no marker was
+        # written at all and the next run charged the customer for voice a second time.
+        # Per-channel, a failure on one channel leaves the other's charge recorded, so a
+        # retry finishes the job instead of repeating it.
+        billed = database.db_overage_items_billed(cid, prev_month)
+        channels = []
+        if voice_cents > 0 and "voice" not in billed:
+            channels.append(("voice", voice_cents, f"Extra minutes ({prev_month})"))
+        if sms_cents > 0 and "sms" not in billed:
+            channels.append(("sms", sms_cents, f"Extra texts ({prev_month})"))
+        tenant_ok = True
+        for channel, cents, description in channels:
+            try:
                 stripe.InvoiceItem.create(
                     customer=t["stripe_customer_id"],
-                    amount=voice_cents,
+                    amount=cents,
                     currency="usd",
-                    description=f"Extra minutes ({prev_month})",
+                    description=description,
+                    # Covers the one window the marker can't: a crash between the create
+                    # and the marker write. Stripe holds keys ~24h, so this backstops a
+                    # same-day retry; the marker is what carries the guarantee after that.
+                    idempotency_key=f"overage:{cid}:{prev_month}:{channel}",
                 )
-                invoices_created += 1
-            if sms_cents > 0:
-                stripe.InvoiceItem.create(
-                    customer=t["stripe_customer_id"],
-                    amount=sms_cents,
-                    currency="usd",
-                    description=f"Extra texts ({prev_month})",
+            except Exception as e:
+                logger.error(
+                    "overage_invoice_failed",
+                    extra={
+                        "client_id": cid,
+                        "month": prev_month,
+                        "channel": channel,
+                        "error": str(e),
+                    },
                 )
-                invoices_created += 1
+                errors += 1
+                tenant_ok = False
+                continue
+            invoices_created += 1
+            if not database.db_overage_item_mark_billed(cid, prev_month, channel):
+                # Charged in Stripe but the guard didn't persist. Next run would re-bill
+                # this channel, so say so loudly rather than let it fail silently.
+                logger.error(
+                    "overage_marker_write_failed",
+                    extra={"client_id": cid, "month": prev_month, "channel": channel},
+                )
+                errors += 1
+                tenant_ok = False
+        if tenant_ok:
             database.db_overage_processed_insert(cid, prev_month)
-        except Exception as e:
-            logger.error(
-                "overage_invoice_failed",
-                extra={"client_id": cid, "month": prev_month, "error": str(e)},
-            )
-            errors += 1
         tenants_processed += 1
     result = {
         "ok": True,
