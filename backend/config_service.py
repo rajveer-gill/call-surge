@@ -236,6 +236,7 @@ def _config_data_to_business_info(data: dict) -> dict:
         "phone": data.get("phone", ""),
         "forwarding_phone": forwarding,
         "email": data.get("email", ""),
+        "notification_email": data.get("notification_email", ""),
         "address": data.get("address", ""),
         "departments": _departments,
         "menu_link": data.get("menu_link", ""),

@@ -213,3 +213,55 @@ def test_the_date_is_readable_not_iso():
 
     assert cs.staff_schedule_friendly_date("2026-09-10").startswith("Thursday")
     assert cs.staff_schedule_friendly_date("nonsense") == "nonsense"
+
+
+# --- who actually gets it -----------------------------------------------------
+
+
+def _recipients_used(biz, monkeypatch):
+    """Run the notifier and report which addresses it would email."""
+    import conversation_service as cs
+
+    sent_to: list = []
+    monkeypatch.setattr(
+        cs.threading,
+        "Thread",
+        lambda target=None, **k: type("T", (), {"start": lambda _s: target()})(),
+    )
+    monkeypatch.setattr(
+        email_notify, "notify_store_of_request", lambda **kw: sent_to.append(kw["to"]) or True
+    )
+    cs._email_store_about_request(APT, biz, "st_t")
+    return sent_to
+
+
+def test_the_notification_address_wins_over_the_contact_address(monkeypatch):
+    """The desk that acts on a booking is often not the address on the website."""
+    biz = {**BIZ, "email": "info@salon.test", "notification_email": "frontdesk@salon.test"}
+    assert _recipients_used(biz, monkeypatch) == ["frontdesk@salon.test"]
+
+
+def test_it_falls_back_to_the_contact_address(monkeypatch):
+    """A store that never sets the new field must still hear about requests."""
+    biz = {**BIZ, "email": "info@salon.test", "notification_email": ""}
+    assert _recipients_used(biz, monkeypatch) == ["info@salon.test"]
+
+
+def test_several_people_can_be_notified(monkeypatch):
+    """"Me and the salon manager" is the usual answer."""
+    biz = {**BIZ, "notification_email": "lana@gillsalons.com, manager@salon.test"}
+    assert _recipients_used(biz, monkeypatch) == [
+        "lana@gillsalons.com",
+        "manager@salon.test",
+    ]
+
+
+def test_semicolons_and_junk_entries_are_tolerated(monkeypatch):
+    """People paste address lists out of Outlook."""
+    biz = {**BIZ, "notification_email": "a@b.test;  ; not-an-address , c@d.test"}
+    assert _recipients_used(biz, monkeypatch) == ["a@b.test", "c@d.test"]
+
+
+def test_neither_address_set_sends_nothing(monkeypatch):
+    biz = {**BIZ, "email": "", "notification_email": ""}
+    assert _recipients_used(biz, monkeypatch) == []

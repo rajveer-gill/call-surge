@@ -1961,8 +1961,15 @@ def _email_store_about_request(
     would be dead air on the phone. Nothing here can fail the booking: the request is
     already written, and a shop with no email address in Settings simply gets nothing.
     """
-    to_addr = ((biz or {}).get("email") or "").strip()
-    if not to_addr:
+    # notification_email is where the shop wants BOOKINGS to land, which is often not the
+    # address on their website — a front desk or a manager rather than general contact.
+    # Falls back to the contact address so a store that never sets it still hears about
+    # requests. Comma-separated because "me and the salon manager" is the usual answer.
+    raw_to = ((biz or {}).get("notification_email") or "").strip() or (
+        (biz or {}).get("email") or ""
+    ).strip()
+    recipients = [a.strip() for a in raw_to.replace(";", ",").split(",") if "@" in a.strip()]
+    if not recipients:
         return
 
     staff_name = ""
@@ -1972,7 +1979,6 @@ def _email_store_about_request(
             break
 
     payload = dict(
-        to=to_addr,
         business_name=(biz.get("public_name") or biz.get("name") or "").strip(),
         customer_name=(apt.get("name") or "").strip(),
         customer_phone=(apt.get("phone") or "").strip(),
@@ -1989,11 +1995,16 @@ def _email_store_about_request(
         try:
             import email_notify
 
-            ok = email_notify.notify_store_of_request(**payload)
+            sent = sum(
+                1
+                for addr in recipients
+                if email_notify.notify_store_of_request(to=addr, **payload)
+            )
             system_info(
                 "new_request_email",
                 apt_id=apt.get("id"),
-                sent=bool(ok),
+                recipients=len(recipients),
+                sent=sent,
                 client_id=(apt.get("client_id") or ""),
             )
         except Exception as e:  # never surface into the call

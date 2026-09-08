@@ -170,6 +170,10 @@ class BusinessInfoUpdate(BaseModel):
     phone: Optional[str] = None
     forwarding_phone: Optional[str] = None
     email: Optional[str] = None
+    # Where "a request just came in" goes. Separate from `email`, which is the shop's
+    # general contact address — the desk that needs to act on a booking is often not the
+    # address on the website. Comma-separated: a manager and an owner both want these.
+    notification_email: Optional[str] = None
     address: Optional[str] = None
     departments: Optional[List[str]] = None
     services: Optional[List[Any]] = None

@@ -218,6 +218,7 @@ export default function Settings() {
     quote_prices: true,
     public_name: '',
     email: '',
+    notification_email: '',
     address: '',
     menu_link: '',
     greeting: '',
@@ -374,6 +375,7 @@ export default function Settings() {
             quote_prices: d.quote_prices === undefined ? true : Boolean(d.quote_prices),
             public_name: (d.public_name as string) || '',
             email: (d.email as string) || '',
+            notification_email: (d.notification_email as string) || '',
             address: (d.address as string) || '',
             menu_link: (d.menu_link as string) || '',
             greeting: (d.greeting as string) || '',
@@ -606,6 +608,7 @@ export default function Settings() {
         quote_prices: form.quote_prices,
         public_name: form.public_name ?? '',
         email: form.email || undefined,
+        notification_email: form.notification_email || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
         greeting: form.greeting || undefined,
@@ -1315,6 +1318,23 @@ export default function Settings() {
               className="cs-field w-full"
               placeholder="info@yourbusiness.com"
             />
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Where to send new appointment requests
+            </label>
+            <input
+              type="text"
+              value={form.notification_email}
+              onChange={(e) => setForm((f) => ({ ...f, notification_email: e.target.value }))}
+              className="cs-field w-full"
+              placeholder="frontdesk@yourbusiness.com, manager@yourbusiness.com"
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              We email here the moment the receptionist takes a request, so nobody has to
+              watch this page. Separate several addresses with commas. Leave blank to use
+              the Email above.
+            </p>
           </div>
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
