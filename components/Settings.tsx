@@ -21,8 +21,11 @@ import {
   PhoneForwarded,
   MessageSquare,
   ChevronDown,
+  Plus,
+  X,
 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
+import { splitEmails, joinEmails } from '@/lib/notifyEmails'
 import {
   RANDOM_NAMES,
   SPEECH_SPEED_MAX,
@@ -218,13 +221,14 @@ export default function Settings() {
     quote_prices: true,
     public_name: '',
     email: '',
-    notification_email: '',
     address: '',
     menu_link: '',
     greeting: '',
   })
   const [serviceItems, setServiceItems] = useState<ServiceRow[]>([])
   const [closures, setClosures] = useState<string[]>([])
+  // Stored as one comma-separated string on the business record; edited as rows here.
+  const [notifyEmails, setNotifyEmails] = useState<string[]>([''])
   const [timeOffOpen, setTimeOffOpen] = useState(false)
   const [specialItems, setSpecialItems] = useState<SpecialRow[]>([])
   const [ruleItems, setRuleItems] = useState<RuleRow[]>([])
@@ -355,6 +359,7 @@ export default function Settings() {
           }
           setVoice((d.voice as string) || 'fable')
           setStaff(normalizeStaffFromApi(d.staff ?? []))
+          setNotifyEmails(splitEmails(d.notification_email as string | undefined))
           setTransferTargets(normalizeTransferFromApi(d.transfer_targets ?? []))
           const spd = typeof d.speed === 'number' ? d.speed : 1.0
           setSpeechSpeed(Math.max(SPEECH_SPEED_MIN, Math.min(SPEECH_SPEED_MAX, spd)))
@@ -375,7 +380,6 @@ export default function Settings() {
             quote_prices: d.quote_prices === undefined ? true : Boolean(d.quote_prices),
             public_name: (d.public_name as string) || '',
             email: (d.email as string) || '',
-            notification_email: (d.notification_email as string) || '',
             address: (d.address as string) || '',
             menu_link: (d.menu_link as string) || '',
             greeting: (d.greeting as string) || '',
@@ -608,7 +612,7 @@ export default function Settings() {
         quote_prices: form.quote_prices,
         public_name: form.public_name ?? '',
         email: form.email || undefined,
-        notification_email: form.notification_email || undefined,
+        notification_email: joinEmails(notifyEmails) || undefined,
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
         greeting: form.greeting || undefined,
@@ -1323,17 +1327,50 @@ export default function Settings() {
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Where to send new appointment requests
             </label>
-            <input
-              type="text"
-              value={form.notification_email}
-              onChange={(e) => setForm((f) => ({ ...f, notification_email: e.target.value }))}
-              className="cs-field w-full"
-              placeholder="frontdesk@yourbusiness.com, manager@yourbusiness.com"
-            />
+            <div className="flex flex-col gap-2">
+              {notifyEmails.map((addr, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    type="email"
+                    value={addr}
+                    onChange={(e) =>
+                      setNotifyEmails((list) =>
+                        list.map((v, j) => (j === i ? e.target.value : v)),
+                      )
+                    }
+                    className="cs-field w-full"
+                    placeholder="frontdesk@yourbusiness.com"
+                  />
+                  {/* Always removable, even the last one: clearing the list is how a shop
+                      turns these emails off, and hiding the control would strand them. */}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${addr.trim() || 'this address'}`}
+                    onClick={() =>
+                      setNotifyEmails((list) => {
+                        const next = list.filter((_, j) => j !== i)
+                        return next.length ? next : ['']
+                      })
+                    }
+                    className="shrink-0 rounded-lg border border-gray-200 p-2 text-gray-400 hover:bg-gray-50 hover:text-gray-700"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setNotifyEmails((list) => [...list, ''])}
+                className="self-start inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                <Plus className="h-4 w-4 text-teal-600" />
+                Add email
+              </button>
+            </div>
             <p className="text-xs text-gray-500 mt-1">
-              We email here the moment the receptionist takes a request, so nobody has to
-              watch this page. Separate several addresses with commas. Leave blank and no
-              email is sent — requests still appear on the Appointments page.
+              We email these addresses the moment the receptionist takes a request, so
+              nobody has to watch this page. Leave it empty and no email is sent — requests
+              still appear on the Appointments page.
             </p>
           </div>
           <div className="md:col-span-2">
