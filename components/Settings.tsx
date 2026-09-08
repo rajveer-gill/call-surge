@@ -1332,8 +1332,8 @@ export default function Settings() {
             />
             <p className="text-xs text-gray-500 mt-1">
               We email here the moment the receptionist takes a request, so nobody has to
-              watch this page. Separate several addresses with commas. Leave blank to use
-              the Email above.
+              watch this page. Separate several addresses with commas. Leave blank and no
+              email is sent — requests still appear on the Appointments page.
             </p>
           </div>
           <div className="md:col-span-2">

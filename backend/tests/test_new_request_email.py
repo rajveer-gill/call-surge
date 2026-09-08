@@ -25,7 +25,8 @@ import email_notify
 BIZ = {
     "name": "19765 Gig Harbor",
     "public_name": "Gig Harbor Hair Masters",
-    "email": "salon@example.test",
+    "email": "info@salon.test",              # the shop's public contact address
+    "notification_email": "salon@example.test",  # where bookings are actually wanted
     "staff": [{"id": "st_t", "name": "Terrance"}],
 }
 
@@ -204,7 +205,7 @@ def test_no_email_configured_starts_no_thread(monkeypatch):
             "T", (), {"start": lambda _s: started.append(1)}
         )()
     )
-    cs._email_store_about_request(APT, {**BIZ, "email": ""}, "st_t")
+    cs._email_store_about_request(APT, {**BIZ, "notification_email": ""}, "st_t")
     assert started == []
 
 
@@ -241,10 +242,15 @@ def test_the_notification_address_wins_over_the_contact_address(monkeypatch):
     assert _recipients_used(biz, monkeypatch) == ["frontdesk@salon.test"]
 
 
-def test_it_falls_back_to_the_contact_address(monkeypatch):
-    """A store that never sets the new field must still hear about requests."""
+def test_it_does_NOT_fall_back_to_the_contact_address(monkeypatch):
+    """The website address is not a default for customer names and phone numbers.
+
+    A shop that wants the same address can paste it in; choosing it for them is a
+    decision we do not get to make. Blank means no email — the request is still on the
+    Appointments page either way.
+    """
     biz = {**BIZ, "email": "info@salon.test", "notification_email": ""}
-    assert _recipients_used(biz, monkeypatch) == ["info@salon.test"]
+    assert _recipients_used(biz, monkeypatch) == []
 
 
 def test_several_people_can_be_notified(monkeypatch):
@@ -265,3 +271,16 @@ def test_semicolons_and_junk_entries_are_tolerated(monkeypatch):
 def test_neither_address_set_sends_nothing(monkeypatch):
     biz = {**BIZ, "email": "", "notification_email": ""}
     assert _recipients_used(biz, monkeypatch) == []
+
+
+def test_a_blank_address_is_logged_not_silent(monkeypatch):
+    """Silence and a working send look identical from outside. Say which happened."""
+    import conversation_service as cs
+
+    events: list = []
+    monkeypatch.setattr(cs, "system_info", lambda ev, **kw: events.append(ev))
+    monkeypatch.setattr(
+        cs.threading, "Thread", lambda **k: type("T", (), {"start": lambda _s: None})()
+    )
+    cs._email_store_about_request(APT, {**BIZ, "notification_email": ""}, "st_t")
+    assert "new_request_email_no_recipient" in events

@@ -1961,15 +1961,19 @@ def _email_store_about_request(
     would be dead air on the phone. Nothing here can fail the booking: the request is
     already written, and a shop with no email address in Settings simply gets nothing.
     """
-    # notification_email is where the shop wants BOOKINGS to land, which is often not the
-    # address on their website — a front desk or a manager rather than general contact.
-    # Falls back to the contact address so a store that never sets it still hears about
-    # requests. Comma-separated because "me and the salon manager" is the usual answer.
-    raw_to = ((biz or {}).get("notification_email") or "").strip() or (
-        (biz or {}).get("email") or ""
-    ).strip()
+    # Deliberately NOT falling back to the shop's contact address. That address is the one
+    # on their website; sending customer names and phone numbers there because nobody set
+    # this field would be a decision made for them. A shop that wants the same address can
+    # paste it in. Comma-separated because "me and the salon manager" is the usual answer.
+    raw_to = ((biz or {}).get("notification_email") or "").strip()
     recipients = [a.strip() for a in raw_to.replace(";", ",").split(",") if "@" in a.strip()]
     if not recipients:
+        # Blank means silence, which otherwise looks identical to a send that worked.
+        system_info(
+            "new_request_email_no_recipient",
+            apt_id=apt.get("id"),
+            client_id=(apt.get("client_id") or ""),
+        )
         return
 
     staff_name = ""
