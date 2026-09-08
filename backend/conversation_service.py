@@ -1974,13 +1974,26 @@ def _email_store_about_request(
             apt_id=apt.get("id"),
             client_id=(apt.get("client_id") or ""),
         )
-        return
 
     staff_name = ""
+    staff_email = ""
     for s in (biz or {}).get("staff") or []:
         if staff_key and str(s.get("id") or "") == str(staff_key):
             staff_name = (s.get("name") or "").strip()
+            staff_email = (s.get("email") or "").strip()
             break
+    # A stylist hears about it only when they have an address on file. Presence of the
+    # email IS the opt-in — visible in the team member editor, no separate setting — and a
+    # caller who said "anyone's fine" resolves to no stylist, so nobody is told a request
+    # is theirs when it isn't. Skipped when it duplicates a shop address, so whoever set
+    # both is not emailed twice about one booking.
+    notify_stylist = bool(
+        staff_email
+        and "@" in staff_email
+        and staff_email.lower() not in {r.lower() for r in recipients}
+    )
+    if not recipients and not notify_stylist:
+        return
 
     payload = dict(
         business_name=(biz.get("public_name") or biz.get("name") or "").strip(),
@@ -2004,11 +2017,20 @@ def _email_store_about_request(
                 for addr in recipients
                 if email_notify.notify_store_of_request(to=addr, **payload)
             )
+            stylist_sent = False
+            if notify_stylist:
+                shop_only = {"to", "stylist", "dashboard_url"}
+                stylist_sent = email_notify.notify_stylist_of_request(
+                    to=staff_email,
+                    stylist_name=staff_name,
+                    **{k: v for k, v in payload.items() if k not in shop_only},
+                )
             system_info(
                 "new_request_email",
                 apt_id=apt.get("id"),
                 recipients=len(recipients),
                 sent=sent,
+                stylist_notified=bool(stylist_sent),
                 client_id=(apt.get("client_id") or ""),
             )
         except Exception as e:  # never surface into the call

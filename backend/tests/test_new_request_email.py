@@ -284,3 +284,91 @@ def test_a_blank_address_is_logged_not_silent(monkeypatch):
     )
     cs._email_store_about_request(APT, {**BIZ, "notification_email": ""}, "st_t")
     assert "new_request_email_no_recipient" in events
+
+
+# --- the stylist who was asked for -------------------------------------------
+
+
+STAFF_WITH_EMAIL = [{"id": "st_t", "name": "Terrance", "email": "terrance@salon.test"}]
+
+
+def _both_sent(biz, monkeypatch, staff_key="st_t"):
+    """Run the notifier; return (shop addresses, stylist address or None)."""
+    import conversation_service as cs
+
+    shop: list = []
+    stylist: dict = {}
+    monkeypatch.setattr(
+        cs.threading,
+        "Thread",
+        lambda target=None, **k: type("T", (), {"start": lambda _s: target()})(),
+    )
+    monkeypatch.setattr(
+        email_notify, "notify_store_of_request", lambda **kw: shop.append(kw["to"]) or True
+    )
+    monkeypatch.setattr(
+        email_notify, "notify_stylist_of_request", lambda **kw: stylist.update(kw) or True
+    )
+    cs._email_store_about_request(APT, biz, staff_key)
+    return shop, stylist.get("to")
+
+
+def test_a_stylist_with_an_email_is_told(monkeypatch):
+    """Presence of the address is the opt-in — no separate setting to find."""
+    biz = {**BIZ, "staff": STAFF_WITH_EMAIL}
+    shop, stylist = _both_sent(biz, monkeypatch)
+    assert shop == ["salon@example.test"]
+    assert stylist == "terrance@salon.test"
+
+
+def test_a_stylist_without_an_email_is_not(monkeypatch):
+    biz = {**BIZ, "staff": [{"id": "st_t", "name": "Terrance"}]}
+    shop, stylist = _both_sent(biz, monkeypatch)
+    assert shop == ["salon@example.test"]
+    assert stylist is None
+
+
+def test_anyone_is_fine_tells_no_stylist(monkeypatch):
+    """No stylist was chosen, so nobody is told a request is theirs."""
+    biz = {**BIZ, "staff": STAFF_WITH_EMAIL}
+    shop, stylist = _both_sent(biz, monkeypatch, staff_key=None)
+    assert shop == ["salon@example.test"]
+    assert stylist is None
+
+
+def test_nobody_is_emailed_twice_for_setting_both(monkeypatch):
+    """A one-person shop who put the same address in both boxes gets one email."""
+    biz = {
+        **BIZ,
+        "notification_email": "terrance@salon.test",
+        "staff": STAFF_WITH_EMAIL,
+    }
+    shop, stylist = _both_sent(biz, monkeypatch)
+    assert shop == ["terrance@salon.test"]
+    assert stylist is None
+
+
+def test_a_stylist_is_told_even_when_the_shop_set_no_address(monkeypatch):
+    """The two are independent: one being blank must not silence the other."""
+    biz = {**BIZ, "notification_email": "", "staff": STAFF_WITH_EMAIL}
+    shop, stylist = _both_sent(biz, monkeypatch)
+    assert shop == []
+    assert stylist == "terrance@salon.test"
+
+
+def test_the_stylist_email_does_not_claim_it_is_booked():
+    """Same false-confirmation trap we removed from the caller's side of the call."""
+    subject, html, text = email_notify.format_stylist_request_email(
+        stylist_name="Terrance",
+        business_name="Gig Harbor Hair Masters",
+        customer_name="Bob",
+        customer_phone="+12535550102",
+        date="Thursday, September 10",
+        time_ampm="9:00 AM",
+        service="Full Highlight",
+    )
+    assert "asked for you" in subject
+    assert "not booked yet" in html.lower()
+    assert "not booked yet" in text.lower()
+    assert "Terrance" in html and "Bob" in html
+    assert "+12535550102" in text

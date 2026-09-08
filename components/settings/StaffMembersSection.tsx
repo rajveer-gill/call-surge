@@ -611,7 +611,7 @@ export function StaffMembersSection({
                 <motion.div layout>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Phone (optional)</label>
                   <p className="text-xs text-gray-500 mb-1.5">
-                    When set, we can text this person about bookings with them and use their number for call transfers.
+                    Used to transfer calls to this person when a caller asks for them.
                   </p>
                   <input
                     type="tel"
@@ -625,6 +625,10 @@ export function StaffMembersSection({
                 </motion.div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Email (optional)</label>
+                  <p className="text-xs text-gray-500 mb-1.5">
+                    When set, we email this person whenever a caller asks for them by name.
+                    Leave blank and they are not emailed.
+                  </p>
                   <input
                     type="email"
                     value={draft.email}

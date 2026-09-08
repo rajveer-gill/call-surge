@@ -303,3 +303,66 @@ def notify_store_of_request(
     except Exception as e:
         logger.warning("new_request_email_failed: %s", e, exc_info=True)
         return False
+
+
+def format_stylist_request_email(
+    *,
+    stylist_name: str,
+    business_name: str,
+    customer_name: str,
+    customer_phone: str,
+    date: str,
+    time_ampm: str,
+    service: str = "",
+) -> tuple[str, str, str]:
+    """(subject, html, text) telling a STYLIST someone asked for them by name.
+
+    Deliberately not the shop's email reworded. The shop is deciding whether to accept;
+    the stylist is being told their name came up and nothing is settled yet. Saying "you
+    have an appointment" would be the same false confirmation we spent the week removing
+    from the caller's side of the call.
+    """
+    who = (customer_name or "A caller").strip() or "A caller"
+    them = (stylist_name or "you").strip() or "you"
+    when = f"{date} at {time_ampm}".strip()
+    biz = (business_name or "the salon").strip()
+    subject = f"{who} asked for you — {when}"
+
+    rows = [("Customer", who), ("Phone", (customer_phone or "").strip() or "Not provided")]
+    if service and service != "—":
+        rows.append(("Service", service))
+    rows.append(("Requested", when))
+    html_rows = "".join(
+        f"<tr><td style='padding:4px 14px 4px 0;color:#666'>{k}</td>"
+        f"<td style='padding:4px 0'><strong>{v}</strong></td></tr>"
+        for k, v in rows
+    )
+    html = f"""
+    <p>Hi {them}, {who} rang {biz} and asked for you.</p>
+    <p><strong>This is not booked yet</strong> — {biz} still has to confirm it. You are
+    getting this so you know it is coming.</p>
+    <table style="border-collapse:collapse;font-size:15px">{html_rows}</table>
+    <p style="color:#666;font-size:13px">Speak to the front desk if the time does not work.</p>
+    """
+    text = (
+        f"Hi {them}, {who} rang {biz} and asked for you.\n"
+        f"This is NOT booked yet - {biz} still has to confirm it.\n\n"
+        + "\n".join(f"{k}: {v}" for k, v in rows)
+        + "\n\nSpeak to the front desk if the time does not work."
+    )
+    return subject, html.strip(), text.strip()
+
+
+def notify_stylist_of_request(*, to: str, stylist_name: str, **kwargs) -> bool:
+    """Email one stylist that a caller asked for them. Quiet False on anything going wrong."""
+    to_addr = (to or "").strip()
+    if not to_addr or "@" not in to_addr:
+        return False
+    try:
+        subject, html, text = format_stylist_request_email(
+            stylist_name=stylist_name, **kwargs
+        )
+        return send_appointment_email(to_addr, subject=subject, html_body=html, text_body=text)
+    except Exception as e:
+        logger.warning("stylist_request_email_failed: %s", e, exc_info=True)
+        return False
