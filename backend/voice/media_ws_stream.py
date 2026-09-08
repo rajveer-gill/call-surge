@@ -317,6 +317,15 @@ class _BidiSession:
             voice_info(
                 "bidi_echo_discarded", call_sid=self.call_sid, transcript_len=len(text)
             )
+            # The length alone could not settle whether a discarded line was the AI's echo
+            # or a caller being ignored — the one question this guard has to get right. Under
+            # OBS_TRACE_TRANSCRIPT, where caller speech is already recorded, log both sides so
+            # a false positive is readable instead of inferred from a character count.
+            voice_transcript(
+                "echo_discarded",
+                call_sid=self.call_sid,
+                text=f"DISCARDED: {text} || WE SAID: {self._last_spoken_text}",
+            )
             return
         if text:
             await self.utterance_q.put((text, conf))
