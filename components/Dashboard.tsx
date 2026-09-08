@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { LockedFeature } from '@/components/ui/LockedFeature'
 import { formatTimeHhmmToAmPm } from '@/lib/formatTime'
 import { STATUS_CLASSES, STATUS_LABELS } from '@/components/appointments/appointmentStatus'
+import { useNewRequestChime } from '@/lib/useNewRequestChime'
 
 /** Call log outcome pills — dark text on tinted fills for white cards. */
 function callOutcomeClass(outcome: string): string {
@@ -178,6 +179,10 @@ export default function Dashboard() {
     const t = setInterval(() => setTick((n) => n + 1), 15000)
     return () => clearInterval(t)
   }, [])
+
+  // The overview is what most shops leave open all day, so it chimes too. Same stored
+  // preference as the Appointments page; the toggle lives there.
+  useNewRequestChime(appointments, !loading)
 
   const manualRefresh = async () => {
     setRefreshing(true)

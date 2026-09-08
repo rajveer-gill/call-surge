@@ -12,8 +12,12 @@ import {
   Inbox,
   CheckCircle2,
   AlertCircle,
+  Bell,
+  BellOff,
 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
+import { chimeEnabled, setChimeEnabled } from '@/lib/newRequestAlert'
+import { useNewRequestChime } from '@/lib/useNewRequestChime'
 import AppointmentCalendar from '@/components/AppointmentCalendar'
 import { AppointmentCard, apiDetail } from '@/components/appointments/AppointmentCard'
 import { ImportFromZenoti } from '@/components/appointments/ImportFromZenoti'
@@ -40,6 +44,8 @@ export default function Appointments() {
   const reduceMotion = useReducedMotion()
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [loading, setLoading] = useState(true)
+  // Starts true to match the server render; the stored preference is read after mount.
+  const [soundOn, setSoundOn] = useState(true)
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [staffFilter, setStaffFilter] = useState('')
   const [dateFrom, setDateFrom] = useState('')
@@ -115,6 +121,12 @@ export default function Appointments() {
     const interval = setInterval(fetchAppointments, 30000)
     return () => clearInterval(interval)
   }, [fetchAppointments])
+
+  useEffect(() => setSoundOn(chimeEnabled()), [])
+
+  // Rings when a request lands while this page is open. Rides the poll above, so it
+  // adds no requests of its own. `!loading` holds the baseline until real data arrives.
+  useNewRequestChime(appointments, !loading)
 
   useEffect(() => {
     api
@@ -420,6 +432,26 @@ export default function Appointments() {
             >
               <Plus className="h-4 w-4" />
               New
+            </motion.button>
+            <motion.button
+              type="button"
+              whileTap={reduceMotion ? undefined : { scale: 0.92 }}
+              onClick={() => {
+                const next = !soundOn
+                setSoundOn(next)
+                setChimeEnabled(next)
+              }}
+              className={`rounded-xl border border-white/10 p-2.5 hover:bg-white/5 ${
+                soundOn ? 'text-cyan-300' : 'text-zinc-500'
+              }`}
+              aria-pressed={soundOn}
+              title={
+                soundOn
+                  ? 'Sound on — plays a chime when a new request arrives'
+                  : 'Sound off — new requests arrive silently'
+              }
+            >
+              {soundOn ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
             </motion.button>
             <motion.button
               type="button"
