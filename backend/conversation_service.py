@@ -39,6 +39,7 @@ from observability import (
     voice_warning,
 )
 from booking_fields import (
+    assistant_asked_name_recently,
     assistant_asked_service_recently,
     booking_context_from_business,
     is_valid_booking_date,
@@ -496,6 +497,7 @@ def _voice_booking_nudge_message(
     info: Optional[dict] = None,
     *,
     appointment_created: bool = False,
+    caller_memory: Optional[dict] = None,
 ) -> Optional[str]:
     """Inject during booking if GPT has not emitted BOOKING: yet.
 
@@ -585,6 +587,25 @@ def _voice_booking_nudge_message(
 
     if turns < 3:
         return None
+    # The name is the one field that cannot be inferred from anything else, and nothing in
+    # this chain had ever checked for it. A caller on 2026-09-09 gave a service, a stylist
+    # and a time across four minutes, was told three times the request was noted, and left
+    # with nothing filed — because they were never asked who they were:
+    #
+    #     18:36:34  ai   "I've noted your request ... today at 3:00 PM."
+    #     18:37:43  call_end  appointment_created=False
+    #
+    # Only when we have not already asked: being asked your name twice running is the other
+    # thing the customer complained about that morning.
+    if not _caller_memory_name_usable(
+        ((caller_memory or {}).get("name") or "").strip(), _staff_name_set(biz)
+    ) and not assistant_asked_name_recently(conversation_history):
+        return (
+            f"BOOKING REMINDER: After {turns} turns you have the visit details but NOT the "
+            "caller's name, and a request cannot be filed without one. Ask ONE short "
+            "question: their name. Do NOT output BOOKING yet, and do NOT say the request "
+            "has been sent, noted, passed on or taken care of until you have it."
+        )
     return (
         f"BOOKING REMINDER: After {turns} turns you have enough details. "
         "Output BOOKING: name|phone|email|date|time|reason|staff on this turn. "
@@ -2966,6 +2987,8 @@ async def generate_response_async(
         nudge = _voice_booking_nudge_message(
             call_data["conversation_history"],
             appointment_created=bool(call_data.get("appointment_created")),
+            # So a repeat caller whose name we already hold is not asked for it again.
+            caller_memory=call_data.get("caller_memory"),
         )
         if nudge:
             messages.append({"role": "system", "content": nudge})

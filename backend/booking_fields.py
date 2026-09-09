@@ -405,6 +405,38 @@ def assistant_asked_service_recently(
     return any(_SERVICE_ASK_RE.search(c) for c in assistant_msgs)
 
 
+_NAME_ASK_RE = re.compile(
+    r"your name|name for the|have your name|who(?:'s| is) (?:this|the appointment)|"
+    r"who am i (?:speaking|booking)|whose name",
+    re.I,
+)
+
+
+def assistant_asked_name_recently(
+    conversation_history: Optional[list],
+    *,
+    assistant_window: int = 4,
+) -> bool:
+    """Have we asked this caller their name in the last few turns?
+
+    A booking cannot be filed without a name, and on 2026-09-09 a caller spent four
+    minutes giving a service, a stylist and a time, was told three times the request was
+    noted, and left with nothing — because nobody ever asked who they were.
+
+    The nudge that uses this must not fire when we have already asked and are waiting for
+    the answer, or a caller gets asked their name twice running, which is the other thing
+    the customer complained about the same morning.
+    """
+    if not conversation_history:
+        return False
+    assistant_msgs = [
+        (m.get("content") or "")
+        for m in conversation_history
+        if (m.get("role") or "").strip() == "assistant"
+    ][-assistant_window:]
+    return any(_NAME_ASK_RE.search(c) for c in assistant_msgs)
+
+
 def user_affirmed_after_service_prompt(
     conversation_history: Optional[list],
     ctx: BookingFieldContext,
