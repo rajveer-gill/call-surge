@@ -612,7 +612,10 @@ export default function Settings() {
         quote_prices: form.quote_prices,
         public_name: form.public_name ?? '',
         email: form.email || undefined,
-        notification_email: joinEmails(notifyEmails) || undefined,
+        // Sent even when empty (unlike the fields around it): `undefined` is dropped from
+        // the JSON body, so a shop that removed every address would keep being emailed
+        // with no way to stop. Empty string is how they turn notifications back off.
+        notification_email: joinEmails(notifyEmails),
         address: form.address || undefined,
         menu_link: form.menu_link || undefined,
         greeting: form.greeting || undefined,

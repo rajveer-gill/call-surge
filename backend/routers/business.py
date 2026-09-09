@@ -840,6 +840,13 @@ async def api_update_business_info(
         data["closures"] = staff_schedule.normalize_date_list(update.closures)
     if update.email is not None:
         data["email"] = update.email
+    # Every field on this endpoint is copied across by hand, and this one was declared on
+    # the model, echoed back in greeting_settings_saved's `fields`, and never written — so
+    # Settings accepted the address, said it saved, and booking notifications stayed off.
+    # Nothing failed loudly: the shop sees the request on the dashboard either way, and the
+    # only tell is new_request_email_no_recipient in the logs of a booking that did work.
+    if update.notification_email is not None:
+        data["notification_email"] = (update.notification_email or "").strip()
     if update.address is not None:
         data["address"] = update.address
     if update.departments is not None:
