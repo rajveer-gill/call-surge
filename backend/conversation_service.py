@@ -1091,8 +1091,13 @@ def _extract_booking_line_from_conversation(
         "If caller name, date, and time are all clearly agreed, reply with EXACTLY one line:\n"
         "BOOKING: name|phone|email|date|time|reason|staff\n"
         "Field order is FIXED: (1) caller name, (2) phone, (3) email, (4) date YYYY-MM-DD, "
-        "(5) time — copy the agreed clock time WITH its am/pm period exactly as spoken, "
+        "(5) time — copy the agreed clock time WITH its am/pm period, "
         "e.g. '3 PM', '9:30 AM', '12 PM' for noon; do NOT convert to 24-hour yourself. "
+        # Without this the extractor treated a bare hour as "ambiguous" and returned NONE,
+        # dropping at hangup a call where the caller only ever said "three o'clock".
+        "A bare hour is NOT ambiguous: 'three o'clock', 'at three' and '3:00' from a salon "
+        "caller mean 3 PM, and 9, 10 or 11 mean AM. Write the inferred period; never reply "
+        "NONE just because the caller did not literally say 'AM' or 'PM'. "
         "NEVER put a stylist name in the time field, "
         "(6) service/reason from menu, (7) stylist name.\n"
         "Leave phone and email empty. reason=exact service from menu if known. "
@@ -2924,6 +2929,29 @@ async def generate_response_async(
                 client_id=str(call_data.get("client_id") or ""),
                 available="does NOT work" not in availability,
             )
+        # Whether this caller can be texted at all. The Sept 4 line-type check guards the
+        # one sentence spoken when a booking is filed; it cannot stop the model promising
+        # a text on any other turn, which is what happened to a Verizon salon line on
+        # 2026-09-09 — no booking, no send, no check, and "you'll receive a text" anyway.
+        # The lookup is warmed off the call path, so the first turn may not have it yet.
+        _from = (call_data.get("from_number") or "").strip()
+        if _from:
+            sms_service.prefetch_line_type(_from)
+            if sms_service.known_non_textable(_from):
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "CALLER LINE FACT — authoritative: this caller's number CANNOT "
+                        "receive text messages. Never say you will text them, that they "
+                        "will get a text, or that the salon will confirm by text. Tell "
+                        "them the salon will call them back on this number instead."
+                    ),
+                })
+                voice_info(
+                    "caller_not_textable_fact_injected",
+                    call_sid=call_sid,
+                    client_id=str(call_data.get("client_id") or ""),
+                )
         # Which times are actually free, so an offered time is never one the slot check
         # will refuse a moment later. See stylist_free_times_note.
         free_note = stylist_free_times_note(call_data["conversation_history"])
