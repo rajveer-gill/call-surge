@@ -977,6 +977,45 @@ _FALSE_REQUEST_CLAIM_RE = re.compile(
 )
 
 
+_GENERIC_CONFIRM_ASK = (
+    "I haven't locked anything in just yet—I want to make sure I've got it right. "
+    "Can you confirm the service, day, and time you'd like? Then I'll text you to confirm."
+)
+
+
+def _confirmation_instead_of_false_claim(ai_text: str) -> str:
+    """Turn "I've put in your request for X" into "before I send it — X. Is that right?"
+
+    The claim has to go: nothing was filed. But the details around it are usually correct
+    and hard-won, and throwing the whole sentence away asks the caller to say it all again.
+    Raj, 2026-09-09, having given service, stylist, day and time across four turns:
+
+        ai_said   "Thank you! I've put in a request for a "Shampoo & Haircut" on
+                   Thursday, September 10th, at 3:00 PM."
+        ai_spoken "I haven't locked anything in just yet... Can you confirm the service,
+                   day, and time you'd like?"          <- everything he had just said
+
+    Reusing what the model got right turns a re-interrogation into a yes/no, and a "yes"
+    is the turn on which it finally emits BOOKING. Falls back to the old wording whenever
+    the details cannot be lifted cleanly — a clumsy question beats a wrong one.
+    """
+    m = _FALSE_REQUEST_CLAIM_RE.search(ai_text or "")
+    if not m:
+        return _GENERIC_CONFIRM_ASK
+    # The claim runs "...request", so what follows is the detail: "for a Shampoo &
+    # Haircut on Thursday, September 10th, at 3:00 PM." Take to the end of that sentence.
+    tail = (ai_text[m.end():] or "").strip()
+    tail = re.split(r"(?<=[.!?])\s", tail, maxsplit=1)[0].strip().rstrip(".!?").strip()
+    tail = re.sub(r"^for\s+", "", tail, flags=re.IGNORECASE).strip()
+    # Too short to be a real description ("." or "with us"), or so long it is a speech.
+    if len(tail) < 12 or len(tail) > 160:
+        return _GENERIC_CONFIRM_ASK
+    return (
+        f"Before I send this over, let me make sure I have it right: {tail}. "
+        "Is that correct?"
+    )
+
+
 def _ai_implies_committed_booking(ai_text: str) -> bool:
     t = (ai_text or "").lower()
     if not t:
@@ -3265,10 +3304,7 @@ async def generate_response_async(
                 call_sid=call_sid,
                 client_id=str(call_data.get("client_id") or ""),
             )
-            ai_text = (
-                "I haven't locked anything in just yet—I want to make sure I've got it right. "
-                "Can you confirm the service, day, and time you'd like? Then I'll text you to confirm."
-            )
+            ai_text = _confirmation_instead_of_false_claim(ai_text or "")
 
         # Never send BOOKING: machine line to TTS or conversation history
         ai_text = _strip_booking_directive_for_voice(ai_text or "")
