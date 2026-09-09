@@ -16,7 +16,15 @@ import {
   BellOff,
 } from 'lucide-react'
 import { useApiClient } from '@/lib/api'
-import { chimeEnabled, setChimeEnabled } from '@/lib/newRequestAlert'
+import {
+  CHIME_VOLUME_LABELS,
+  CHIME_VOLUME_STEPS,
+  chimeEnabled,
+  chimeVolumeIndex,
+  setChimeEnabled,
+  setChimeVolumeIndex,
+} from '@/lib/newRequestAlert'
+import { playChimePreview } from '@/lib/chimePreview'
 import { useNewRequestChime } from '@/lib/useNewRequestChime'
 import AppointmentCalendar from '@/components/AppointmentCalendar'
 import { AppointmentCard, apiDetail } from '@/components/appointments/AppointmentCard'
@@ -46,6 +54,7 @@ export default function Appointments() {
   const [loading, setLoading] = useState(true)
   // Starts true to match the server render; the stored preference is read after mount.
   const [soundOn, setSoundOn] = useState(true)
+  const [volumeIdx, setVolumeIdx] = useState(2)
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [staffFilter, setStaffFilter] = useState('')
   const [dateFrom, setDateFrom] = useState('')
@@ -122,7 +131,10 @@ export default function Appointments() {
     return () => clearInterval(interval)
   }, [fetchAppointments])
 
-  useEffect(() => setSoundOn(chimeEnabled()), [])
+  useEffect(() => {
+    setSoundOn(chimeEnabled())
+    setVolumeIdx(chimeVolumeIndex())
+  }, [])
 
   // Rings when a request lands while this page is open. Rides the poll above, so it
   // adds no requests of its own. `!loading` holds the baseline until real data arrives.
@@ -453,6 +465,25 @@ export default function Appointments() {
             >
               {soundOn ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
             </motion.button>
+            {/* Volume cycles and plays as it goes. Lana has to set this against blowdryers
+                and music, and no label on a screen can tell her what is loud enough for
+                her own room — only hearing it where she stands can. */}
+            {soundOn && (
+              <motion.button
+                type="button"
+                whileTap={reduceMotion ? undefined : { scale: 0.92 }}
+                onClick={() => {
+                  const next = (volumeIdx + 1) % CHIME_VOLUME_STEPS.length
+                  setVolumeIdx(next)
+                  setChimeVolumeIndex(next)
+                  playChimePreview(CHIME_VOLUME_STEPS[next])
+                }}
+                className="rounded-xl border border-white/10 px-3 py-2.5 text-xs font-medium text-zinc-300 hover:bg-white/5"
+                title="Chime volume — tap to change and hear it"
+              >
+                {CHIME_VOLUME_LABELS[volumeIdx]}
+              </motion.button>
+            )}
             <motion.button
               type="button"
               whileTap={reduceMotion ? undefined : { scale: 0.92, rotate: 180 }}

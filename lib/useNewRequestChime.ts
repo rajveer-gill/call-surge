@@ -16,7 +16,12 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react'
-import { awaitingRequestIds, chimeEnabled, newlyArrived } from '@/lib/newRequestAlert'
+import {
+  awaitingRequestIds,
+  chimeEnabled,
+  chimeVolume,
+  newlyArrived,
+} from '@/lib/newRequestAlert'
 
 type StatusRow = { id: number; status: string }
 
@@ -32,13 +37,19 @@ function audioContextCtor(): AudioContextCtor | null {
 }
 
 /** One doorbell-ish note. Envelope ramps rather than hard starts, which would click. */
-function playNote(ctx: AudioContext, freq: number, startAt: number, seconds: number): void {
+function playNote(
+  ctx: AudioContext,
+  freq: number,
+  startAt: number,
+  seconds: number,
+  peak: number,
+): void {
   const osc = ctx.createOscillator()
   const gain = ctx.createGain()
   osc.type = 'sine'
   osc.frequency.value = freq
   gain.gain.setValueAtTime(0.0001, startAt)
-  gain.gain.exponentialRampToValueAtTime(0.18, startAt + 0.02)
+  gain.gain.exponentialRampToValueAtTime(peak, startAt + 0.02)
   gain.gain.exponentialRampToValueAtTime(0.0001, startAt + seconds)
   osc.connect(gain).connect(ctx.destination)
   osc.start(startAt)
@@ -95,8 +106,10 @@ export function useNewRequestChime(appointments: readonly StatusRow[], ready: bo
     if (!ctx || ctx.state !== 'running') return
     try {
       const now = ctx.currentTime
-      playNote(ctx, 880, now, 0.18) // A5
-      playNote(ctx, 1174.66, now + 0.16, 0.28) // D6
+      // Read at play time, not mount, so changing the setting takes effect immediately.
+      const peak = chimeVolume()
+      playNote(ctx, 880, now, 0.18, peak) // A5
+      playNote(ctx, 1174.66, now + 0.16, 0.28, peak) // D6
     } catch {
       /* never let a sound break the dashboard */
     }

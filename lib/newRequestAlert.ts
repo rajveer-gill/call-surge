@@ -19,6 +19,48 @@
 import { needsResponse } from '@/components/appointments/appointmentStatus'
 
 export const CHIME_STORAGE_KEY = 'nuvatra.requestChime'
+export const CHIME_VOLUME_KEY = 'nuvatra.requestChimeVolume'
+
+/**
+ * Lana Anderberg, go-live day: "The sound the site makes when a request comes in is too
+ * quiet. Salons are loud places, music is playing, people are talking, blowdryers are
+ * running. Could we have customization over the sound setting and volume?"
+ *
+ * The old fixed value was 0.18, chosen at a desk at midnight. Loud is now the default and
+ * the range goes well above it, because the failure the salon actually experiences is not
+ * hearing a customer's request at all.
+ */
+export const CHIME_VOLUME_STEPS = [0.15, 0.35, 0.6, 1.0] as const
+export const CHIME_VOLUME_LABELS = ['Quiet', 'Medium', 'Loud', 'Loudest'] as const
+export const CHIME_VOLUME_DEFAULT_INDEX = 2 // Loud — a salon, not an office
+
+export function chimeVolumeIndex(): number {
+  try {
+    const raw = window.localStorage.getItem(CHIME_VOLUME_KEY)
+    // Number('') is 0, which is a valid index — so an empty stored value would quietly
+    // mean "Quiet", the exact complaint this setting exists to fix. Treat blank as unset.
+    const i = raw === null || !raw.trim() ? NaN : Number(raw)
+    return Number.isInteger(i) && i >= 0 && i < CHIME_VOLUME_STEPS.length
+      ? i
+      : CHIME_VOLUME_DEFAULT_INDEX
+  } catch {
+    return CHIME_VOLUME_DEFAULT_INDEX
+  }
+}
+
+export function setChimeVolumeIndex(i: number): void {
+  const clamped = Math.min(Math.max(Math.round(i), 0), CHIME_VOLUME_STEPS.length - 1)
+  try {
+    window.localStorage.setItem(CHIME_VOLUME_KEY, String(clamped))
+  } catch {
+    /* ignore — the choice still applies for this page's lifetime */
+  }
+}
+
+/** Gain for the current setting. Never returns 0: silence is what the toggle is for. */
+export function chimeVolume(): number {
+  return CHIME_VOLUME_STEPS[chimeVolumeIndex()]
+}
 
 /** The appointment shape this module needs — kept minimal so callers can pass anything. */
 type StatusRow = { id: number; status: string }
