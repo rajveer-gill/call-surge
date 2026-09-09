@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -33,6 +34,49 @@ _log = logging.getLogger("nuvatra")
 # seconds is far longer than any real booking sentence and far shorter than a caller would
 # tolerate waiting.
 MAX_UTTERANCE_HOLD_SEC = 20.0
+
+# Words a sentence cannot stop on. Deepgram endpoints on breath, not on grammar, so a
+# caller who takes a beat before a name gets committed mid-phrase. Raj, 2026-09-09, said
+# one sentence and was cut here:
+#
+#     05:41:25  caller_said  "Hi. I'd like to book a shampoo and haircut on Friday at 11AM with"
+#     05:41:26  ai_said      "...Which stylist would you like...?"     <- already answered
+#     05:41:42  caller_said  "Terrence."                               <- his own tail, 16s later
+#     05:41:59  call_end     appointment_created=False
+#
+# "with" cannot end an English sentence, so the turn was demonstrably not over. Waiting one
+# more debounce when the transcript dangles like this costs a few hundred ms on the rare
+# turn that really does end on one of these, and it is the difference between hearing
+# "with Terrance" and hearing "with".
+#
+# Deliberately a closed list of function words rather than anything cleverer: being wrong
+# costs one extra debounce, so the list can be generous, but it must never be open-ended —
+# a rule that could match a content word would hold the line open on ordinary answers.
+_DANGLING_WORDS = frozenset(
+    """
+    a an the my your our their his her its
+    with at on in for to from by of about into onto upon until during near around
+    between through over under after before against along across behind beside
+    and or but nor because if when while unless since although though whether than
+    is are was were be been being does did has have had having
+    can could will would shall should may might must
+    """.split()
+)
+# Deliberately NOT in that list, though they are all function words: a caller ends a turn
+# on every one of these regularly, and holding the line open would delay the most ordinary
+# answers on the call.
+#
+#   am        "Saturday at 10 AM" — and the tokenizer drops digits, so "11AM" reads as "am"
+#   no, yes   whole answers on their own
+#   you       "thank you", said at the end of most calls
+#   that, it, this, there, here, done, some, any
+#
+# The first of those was caught by test_ongoing_speech_holds_the_turn_open, which committed
+# "…on Thursday at 11AM" and then waited — a time is not an unfinished sentence.
+# How many extra debounce windows a dangling word may buy. Two is enough for a caller
+# gathering their thought before a name; more would start to feel like the line is dead,
+# and MAX_UTTERANCE_HOLD_SEC is the outer backstop either way.
+_MAX_DANGLING_EXTENSIONS = 2
 
 
 def _resolve_stream_base_url(row: dict[str, Any], call_sid: str) -> tuple[str, str]:
@@ -146,9 +190,31 @@ class _UtteranceCollector:
         self._cancel_debounce()
         self._debounce_task = asyncio.create_task(self._debounced_commit())
 
+    def _ends_mid_phrase(self) -> bool:
+        """True when the last word heard cannot be the last word of a sentence.
+
+        Checked against the assembled transcript, not the newest fragment, because the
+        dangling word is whatever the caller trailed off on across finals and interim.
+        """
+        text, _ = self.transcript()
+        words = [w for w in re.findall(r"[A-Za-z']+", text)]
+        return bool(words) and words[-1].lower() in _DANGLING_WORDS
+
     async def _debounced_commit(self) -> None:
         try:
-            await asyncio.sleep(self.debounce_sec)
+            for attempt in range(_MAX_DANGLING_EXTENSIONS + 1):
+                await asyncio.sleep(self.debounce_sec)
+                # Last time round we take whatever we have: they really did stop on "with".
+                if attempt == _MAX_DANGLING_EXTENSIONS or not self._ends_mid_phrase():
+                    break
+                # Fresh speech during the extra wait cancels this task and reschedules
+                # from the top (see _schedule_commit), so this only ever loops on silence.
+                voice_info(
+                    "utterance_dangling_extend",
+                    call_sid=self.call_sid,
+                    attempt=attempt + 1,
+                    transcript_len=len(self.transcript()[0]),
+                )
             await self.commit_now()
         except asyncio.CancelledError:
             return

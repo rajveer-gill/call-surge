@@ -42,6 +42,7 @@ from voice.streaming_tts import stream_tts_ulaw_frames
 from voice.twilio_call import safe_twilio_call_update
 from voice.barge_detector import BargeDetector, barge_in_enabled
 from voice.twilio_media import parse_twilio_media_message, twilio_media_payload_bytes, twilio_start_meta
+from voice.media_ws import _DANGLING_WORDS, _MAX_DANGLING_EXTENSIONS
 from voice.turn_chime import TURN_CHIME_FRAMES, chime_enabled
 from voice.utterance import apply_caller_utterance
 
@@ -359,9 +360,40 @@ class _BidiSession:
             self._commit_task.cancel()
         self._commit_task = asyncio.create_task(self._debounced_commit())
 
+    def _ends_mid_phrase(self) -> bool:
+        """True when the last word heard cannot be the last word of a sentence."""
+        text = " ".join(self._finals).strip() or self._interim.strip()
+        words = re.findall(r"[A-Za-z']+", text)
+        return bool(words) and words[-1].lower() in _DANGLING_WORDS
+
     async def _debounced_commit(self) -> None:
         try:
-            await asyncio.sleep(self.debounce_sec)
+            # Deepgram endpoints on breath, not on grammar. Raj, 2026-09-09, asking to be
+            # put through to the salon — cut twice in one call, on "be" and on "to":
+            #
+            #   21:13:54  caller_said  "I like to be"
+            #   21:14:07  caller_said  "No. I'd like to"
+            #   21:14:20  caller_said  "No. I'd like to be transferred to this alone."
+            #
+            # Neither fragment carried the word that triggers a transfer, so he was
+            # answered twice by the model before the third attempt got through. Waiting
+            # one more debounce when the transcript ends somewhere a sentence cannot is a
+            # few hundred ms on the rare turn that really does stop on "to", and it is the
+            # difference between hearing the request and hearing the run-up to it.
+            #
+            # The turn chime rides on this too: it fires at the commit, so a commit that
+            # lands mid-sentence is heard as the chime cutting the caller off.
+            for attempt in range(_MAX_DANGLING_EXTENSIONS + 1):
+                await asyncio.sleep(self.debounce_sec)
+                if attempt == _MAX_DANGLING_EXTENSIONS or not self._ends_mid_phrase():
+                    break
+                # Fresh speech during the extra wait cancels this task and reschedules
+                # from the top, so this only ever loops on silence.
+                voice_info(
+                    "bidi_dangling_extend",
+                    call_sid=self.call_sid,
+                    attempt=attempt + 1,
+                )
         except asyncio.CancelledError:
             return
         text = " ".join(self._finals).strip() or self._interim.strip()
