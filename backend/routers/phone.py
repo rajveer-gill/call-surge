@@ -526,14 +526,14 @@ async def handle_incoming_call(request: Request):
         )
         form_data = await request.form()
         form_dict = dict(form_data)
-        if not deps._validate_twilio_webhook(request, form_dict):
+        if not deps._validate_twilio_webhook(request, form_dict): # validate the webhook signature
             auth_warning(
                 "voice_webhook_invalid_signature",
                 path=request.url.path,
                 request_id=getattr(request.state, "request_id", None),
             )
             raise HTTPException(status_code=403, detail="Invalid webhook signature")
-        call_sid = form_data.get("CallSid")
+        call_sid = form_data.get("CallSid") # parse call fields
         from_number = form_data.get("From")
         to_number = form_data.get("To")
 
@@ -575,7 +575,7 @@ async def handle_incoming_call(request: Request):
             subscription_denied_voice_twiml,
         )
 
-        if not check_webhook_tenant_access(
+        if not check_webhook_tenant_access( # check if the tenant has access to the channel
             tenant_for_access,
             channel="voice",
             request_id=getattr(request.state, "request_id", None),
@@ -654,7 +654,7 @@ async def handle_incoming_call(request: Request):
             to_number=to_number,
         )
 
-        base_url = deps._twilio_base_url(request)
+        base_url = deps._twilio_base_url(request) # get the base url for the request
         if not base_url:
             logger.error(
                 "[VOICE] incoming_call missing public base URL; set PUBLIC_BASE_URL (or NGROK_URL), "
