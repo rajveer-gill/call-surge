@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 from urllib.parse import quote, urlparse
@@ -776,7 +776,10 @@ def call_log_start(call_sid: str, from_number: str, to_number: str):
         "call_sid": call_sid,
         "from_number": from_number,
         "to_number": to_number,
-        "start_iso": datetime.now().isoformat(),
+        # Timezone-aware on purpose: a bare "2026-09-09T17:18:06" is read as LOCAL time by
+        # the browser, which showed Gig Harbor every call seven hours out. Readers also
+        # repair older naive rows (analytics._mark_utc); this stops new ones needing it.
+        "start_iso": datetime.now(timezone.utc).isoformat(),
         "outcome": None,
         "end_iso": None,
         "duration_sec": None,
@@ -933,6 +936,34 @@ def _fetch_twilio_recording_bytes(recording_url: str) -> tuple:
     return r.status_code, r.content
 
 
+def _call_summary_system_prompt(receptionist_name: str, business_name: str) -> str:
+    """Tell the summariser which voice on the tape is ours.
+
+    Whisper returns one undifferentiated block of text with no speaker labels, and our
+    receptionist opens every call by introducing herself — "Hi, I'm Ava." So the model
+    read the only name in the transcript as the caller's, and the dashboard filled up with:
+
+        "Ava called to request a shampoo and haircut appointment with Melissa..."
+        "The caller, Ava, initiated the call but did not specify a clear intent..."
+
+    Ava answered those calls. Naming her as the customer makes the one column the salon
+    actually reads describe the wrong person, and no amount of "be factual" fixes it
+    because the transcript genuinely does not say who is who.
+    """
+    who = (receptionist_name or "").strip() or "the AI receptionist"
+    where = (business_name or "").strip() or "the business"
+    return (
+        f"Summarize this phone call in 2-4 clear sentences for the {where} owner's dashboard. "
+        f"The call is between {who}, an AI receptionist who ANSWERS the phone for {where}, "
+        f"and a customer who phoned in. {who} is never the caller: she introduces herself at "
+        f"the start of every call, so treat any introduction by {who} as the business "
+        f"answering, not as the customer's name. Refer to the other person as the caller, or "
+        "by the name they give for the booking. "
+        "Mention caller intent (e.g. appointment, question, complaint) if clear. "
+        "Be factual; do not invent details."
+    )
+
+
 def _summarize_call_recording_sync(
     call_sid: str, client_id: str, recording_url: str, duration_sec: Optional[int]
 ) -> None:
@@ -978,12 +1009,22 @@ def _summarize_call_recording_sync(
         text = (getattr(transcript, "text", None) or "").strip()
         if not text:
             return
+        # Before reading config: the receptionist's name is per-tenant, and this runs on a
+        # background thread with no request context of its own.
+        database.set_request_client_id(client_id)
+        try:
+            info = config_service.get_business_info() or {}
+        except Exception:
+            info = {}
         resp = runtime.client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
-                    "content": "Summarize this phone call in 2–4 clear sentences for a business owner dashboard. Mention caller intent (e.g. appointment, question, complaint) if clear. Be factual; do not invent details.",
+                    "content": _call_summary_system_prompt(
+                        info.get("receptionist_name") or "",
+                        info.get("public_name") or info.get("name") or "",
+                    ),
                 },
                 {"role": "user", "content": text[:12000]},
             ],
