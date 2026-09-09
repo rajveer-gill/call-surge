@@ -720,7 +720,14 @@ def build_system_prompt(
             "Keep responses brief (1-2 short sentences) and clear. "
             "Your reply is spoken aloud by a text-to-speech voice, so write plain spoken "
             "words only — never use markdown, asterisks, bullet points, headings, emoji, "
-            "or other symbols."
+            "or other symbols. "
+            # Lana Anderberg, go-live morning 2026-09-09: it asked her for the date three
+            # times in identical words while she answered a different question each time.
+            # A person who gets an unrelated answer twice does not recite the same sentence.
+            "NEVER ask the same question twice in the same words. If the caller did not "
+            "answer what you asked, they probably did not hear it — ask again in different "
+            "words and give a concrete example of the answer you want, for example "
+            "\"sorry, which day did you want — today, or later this week?\""
         )
     else:
         header = (
@@ -729,7 +736,14 @@ def build_system_prompt(
             "Keep responses brief (1-2 short sentences) and clear. "
             "Your reply is spoken aloud by a text-to-speech voice, so write plain spoken "
             "words only — never use markdown, asterisks, bullet points, headings, emoji, "
-            "or other symbols."
+            "or other symbols. "
+            # Lana Anderberg, go-live morning 2026-09-09: it asked her for the date three
+            # times in identical words while she answered a different question each time.
+            # A person who gets an unrelated answer twice does not recite the same sentence.
+            "NEVER ask the same question twice in the same words. If the caller did not "
+            "answer what you asked, they probably did not hear it — ask again in different "
+            "words and give a concrete example of the answer you want, for example "
+            "\"sorry, which day did you want — today, or later this week?\""
         )
 
     focus_block = appointment_focus_guidance(

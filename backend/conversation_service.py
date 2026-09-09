@@ -2057,6 +2057,60 @@ def _create_appointment_from_booking(
     return appointment_data
 
 
+def _normalized_question(text: str) -> str:
+    """A reply reduced to its words, for comparing one turn against the last."""
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower()))
+
+
+def _note_repeated_question(call_data: dict, ai_text: str, call_sid: str = "") -> bool:
+    """Log when the receptionist says the same thing twice in a row. Returns whether it did.
+
+    Lana Anderberg, go-live morning, after her 10:07 call:
+
+        "the receptionist is still repeating questions that have been answered, most
+         often asking for the date after the caller has already said it"
+
+    What the log shows is worse than re-asking an answered question — it is reciting the
+    identical sentence:
+
+        17:08:46  ai    "Could you please confirm the date you'd like for the
+                         Shampoo & Haircut with Melissa at 1:00 PM?"
+        17:08:55  Lana  "Shampoo and haircut."
+        17:08:56  ai    "Could you please confirm the date you'd like...?"
+        17:09:03  Lana  "A shampoo and haircut."
+        17:09:05  ai    "Could you please confirm the date you'd like...?"
+
+    She was a turn behind from talking over it, so she kept answering the previous
+    question — and it kept replying with the same words rather than trying a different
+    way in.
+
+    The prompt now forbids this. Prompt rules in this codebase have a poor record on
+    their own (three rewrites failed to stop invented availability before the fact was
+    computed in code instead), so this counts the occurrences rather than assuming. If
+    ai_repeated_question keeps appearing, the rule is not holding and this needs to be
+    enforced in code the way the availability and free-times facts are.
+    """
+    now = _normalized_question(ai_text)
+    prev = call_data.get("_last_ai_normalized") or ""
+    prev_raw = call_data.get("_last_ai_raw") or ""
+    call_data["_last_ai_normalized"] = now
+    call_data["_last_ai_raw"] = ai_text or ""
+    if not now or now != prev:
+        return False
+    # Only questions. "Got it." and "One moment." legitimately recur turn after turn and
+    # are not what Lana heard; asking her the same thing three times is. Length is the
+    # wrong test for this — "Which day would you like?" is five words and is the bug.
+    if "?" not in (ai_text or "") and "?" not in prev_raw:
+        return False
+    voice_info(
+        "ai_repeated_question",
+        call_sid=call_sid,
+        client_id=str(call_data.get("client_id") or ""),
+        words=len(now.split()),
+    )
+    return True
+
+
 def _email_store_about_request(
     apt: dict, biz: dict, staff_key: Optional[str] = None
 ) -> None:
@@ -2880,6 +2934,7 @@ async def generate_response_async(
         # Full AI reply (incl. any BOOKING marker) when OBS_TRACE_TRANSCRIPT=1 — pairs with the
         # caller_said lines so the whole conversation is reconstructable from the logs.
         voice_transcript("ai_said", call_sid=call_sid, text=ai_text or "")
+        _note_repeated_question(call_data, ai_text or "", call_sid)
         _model_reply_raw = ai_text or ""
         booking = parse_booking(ai_text)
         if booking:
