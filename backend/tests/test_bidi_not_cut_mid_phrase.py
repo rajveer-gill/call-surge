@@ -148,3 +148,32 @@ def test_ordinary_ways_of_finishing_a_turn_are_not_held(ending):
     s = _session()
     s._finals = [ending]
     assert s._ends_mid_phrase() is False, ending
+
+
+@pytest.mark.parametrize(
+    "truncated",
+    [
+        "I like to be trans...",          # his actual turn, "transferred" cut short
+        "I want a sham...",
+        "Can I book an appoint…",         # unicode ellipsis
+    ],
+)
+def test_a_word_deepgram_only_half_heard_is_held(truncated):
+    """Deepgram marks a partially captured word with a trailing ellipsis.
+
+    21:47:41  caller_said  "I like to be trans..."
+
+    The function-word check missed this, because "trans" is not a function word — but
+    mid-syllable is less finished than mid-phrase, not more. Raj: "the chime kept going
+    off in the beginning, I wasn't able to say a full sentence."
+    """
+    s = _session()
+    s._finals = [truncated]
+    assert s._ends_mid_phrase() is True, truncated
+
+
+def test_a_real_ellipsis_mid_sentence_is_not_the_end():
+    """Only a trailing one counts; Deepgram puts them where the audio stopped."""
+    s = _session()
+    s._finals = ["I was thinking... maybe Saturday"]
+    assert s._ends_mid_phrase() is False

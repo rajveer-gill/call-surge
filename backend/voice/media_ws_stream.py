@@ -361,8 +361,18 @@ class _BidiSession:
         self._commit_task = asyncio.create_task(self._debounced_commit())
 
     def _ends_mid_phrase(self) -> bool:
-        """True when the last word heard cannot be the last word of a sentence."""
-        text = " ".join(self._finals).strip() or self._interim.strip()
+        """True when what we have cannot be the end of what the caller was saying."""
+        text = (" ".join(self._finals).strip() or self._interim.strip()).strip()
+        if not text:
+            return False
+        # Deepgram marks a word it caught only part of with a trailing ellipsis. That is a
+        # stronger signal than any word list — the caller was mid-syllable, not mid-thought:
+        #
+        #     21:47:41  caller_said  "I like to be trans..."      <- "transferred"
+        #
+        # The function-word check missed it, because "trans" is not a function word.
+        if text.endswith("...") or text.endswith("…"):
+            return True
         words = re.findall(r"[A-Za-z']+", text)
         return bool(words) and words[-1].lower() in _DANGLING_WORDS
 

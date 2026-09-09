@@ -197,6 +197,14 @@ class _UtteranceCollector:
         dangling word is whatever the caller trailed off on across finals and interim.
         """
         text, _ = self.transcript()
+        text = (text or "").strip()
+        if not text:
+            return False
+        # A word Deepgram only caught part of ends in an ellipsis — "I like to be trans..."
+        # for "transferred". Mid-syllable is even less finished than mid-phrase, and no
+        # word list catches it, because the fragment is not a word.
+        if text.endswith("...") or text.endswith("…"):
+            return True
         words = [w for w in re.findall(r"[A-Za-z']+", text)]
         return bool(words) and words[-1].lower() in _DANGLING_WORDS
 

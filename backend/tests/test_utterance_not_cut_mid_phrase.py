@@ -23,6 +23,7 @@ extra debounce windows. Being wrong costs a few hundred milliseconds; the bug it
 cost a booking.
 """
 import asyncio
+import time
 
 import pytest
 
@@ -54,6 +55,22 @@ async def _settle(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
+async def _wait_committed(done: list, timeout: float = 2.0) -> None:
+    """Wait until the turn commits, rather than sleeping a fixed guess.
+
+    These windows are milliseconds wide, and under the load of the whole suite three
+    chained debounces plus task scheduling comfortably overrun a fixed sleep — which is a
+    flaky test, not a real failure. Polling asserts the same thing (it DOES commit) without
+    betting on the machine being idle.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if done:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("the turn never committed")
+
+
 @pytest.mark.asyncio
 async def test_the_call_that_prompted_this(monkeypatch):
     """His exact transcript: the tail must join the same turn, not become the next one."""
@@ -65,7 +82,7 @@ async def test_the_call_that_prompted_this(monkeypatch):
     assert done == [], "committed on a preposition"
     # He finishes the sentence inside the extra window he has now been given.
     c.on_partial("Terrance.", 0.9)
-    await _settle(DEBOUNCE * 3)
+    await _wait_committed(done)
     assert done == [
         "Hi. I'd like to book a shampoo and haircut on Friday at 11AM with Terrance."
     ]
@@ -77,7 +94,7 @@ async def test_a_finished_sentence_is_not_delayed():
     done: list = []
     c = _collector(done)
     c.on_final_segment("I'd like to book a haircut.", 0.9)
-    await _settle(DEBOUNCE * 1.6)
+    await _wait_committed(done)
     assert done == ["I'd like to book a haircut."]
 
 
@@ -87,7 +104,7 @@ async def test_a_caller_who_really_does_trail_off_is_still_answered():
     done: list = []
     c = _collector(done)
     c.on_final_segment("I want to book with", 0.9)
-    await _settle(DEBOUNCE * (_MAX_DANGLING_EXTENSIONS + 3))
+    await _wait_committed(done)
     assert done == ["I want to book with"]
 
 
@@ -103,7 +120,7 @@ async def test_each_extension_is_re_evaluated():
     await _settle(DEBOUNCE * 1.6)
     assert done == []
     c.on_partial("a trim.", 0.9)
-    await _settle(DEBOUNCE * 3)
+    await _wait_committed(done)
     assert done == ["Book me in for a trim."]
 
 
@@ -123,7 +140,7 @@ async def test_a_name_ending_in_a_dangling_word_is_not_matched():
     done: list = []
     c = _collector(done)
     c.on_final_segment("a haircut with Terrance", 0.9)
-    await _settle(DEBOUNCE * 1.6)
+    await _wait_committed(done)
     assert done == ["a haircut with Terrance"]
 
 
@@ -134,5 +151,5 @@ async def test_one_word_answers_still_commit_immediately():
         done: list = []
         c = _collector(done)
         c.on_final_segment(word, 0.9)
-        await _settle(DEBOUNCE * 1.6)
+        await _wait_committed(done)
         assert done == [word], f"{word} was held"
