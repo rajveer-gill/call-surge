@@ -40,6 +40,7 @@ from voice.media_token import token_stream_generation, verify_pending_media_stre
 from voice.stt_config import utterance_finalize_debounce_ms
 from voice.streaming_tts import stream_tts_ulaw_frames
 from voice.twilio_call import safe_twilio_call_update
+from voice.barge_detector import BargeDetector, barge_in_enabled
 from voice.twilio_media import parse_twilio_media_message, twilio_media_payload_bytes, twilio_start_meta
 from voice.utterance import apply_caller_utterance
 
@@ -112,6 +113,8 @@ class _BidiSession:
         self._commit_task: Optional[asyncio.Task[None]] = None
         # Caller audio captured while the AI was speaking, waiting to be handed over.
         self._talkover: list[bytes] = []
+        # Live listener for talkover, recreated per reply; None whenever we are not speaking.
+        self._barge: Optional[BargeDetector] = None
         self._last_spoken_text = ""
 
     # ---- outbound websocket messages (Twilio bidirectional protocol) ----
@@ -169,6 +172,13 @@ class _BidiSession:
         self._last_spoken_text = text
         self.interrupt.clear()
         self._barge_cleared = False
+        # Listen for the caller starting to talk over this reply. Separate Deepgram stream,
+        # separate from the transcript path entirely — see voice/barge_detector.py.
+        if barge_in_enabled():
+            self._barge = BargeDetector(
+                call_sid=self.call_sid or "", on_barge=self._barge_in
+            )
+            await self._barge.start(text)
         self._reply_mark = asyncio.Event()
         # Drop any half-accumulated transcript so echo captured at the edge of the last turn
         # can't commit as a phantom utterance.
@@ -203,6 +213,7 @@ class _BidiSession:
             if self._closing:
                 # They hung up. Stop streaming into a socket that is gone.
                 self.speaking = False
+                await self._stop_barge()
                 voice_info(
                     "bidi_reply_abandoned", call_sid=self.call_sid, frames=sent,
                     reason="caller_hung_up",
@@ -222,6 +233,7 @@ class _BidiSession:
                 await self._send_clear()
             self.speaking = False
             self._resume_listen_at = loop.time() + _LISTEN_GUARD_SEC
+            await self._stop_barge()
             voice_info("bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=True)
             return
         # All frames sent, but Twilio may still be playing the buffered tail. Mark the end and
@@ -235,7 +247,15 @@ class _BidiSession:
             pass
         self.speaking = False
         self._resume_listen_at = loop.time() + _LISTEN_GUARD_SEC
+        await self._stop_barge()
         voice_info("bidi_reply_spoken", call_sid=self.call_sid, frames=sent, interrupted=False)
+
+    async def _stop_barge(self) -> None:
+        """Close this reply's detector. Called on every exit from _speak — a stream left
+        open would keep billing and keep listening for a reply that is already over."""
+        det, self._barge = self._barge, None
+        if det is not None:
+            await det.stop()
 
     async def _barge_in(self) -> None:
         """Caller spoke while we were talking: flush Twilio's buffer and stop the stream."""
@@ -571,6 +591,11 @@ class _BidiSession:
                     await self._keepalive_deepgram()
                     if payload and len(self._talkover) < _MAX_TALKOVER_FRAMES:
                         self._talkover.append(payload)
+                    # A copy goes to the barge detector, which decides whether this is the
+                    # caller talking over us and stops the reply if so. It never feeds the
+                    # transcript — the buffer above remains the only path for these words.
+                    if payload and self._barge is not None:
+                        await self._barge.feed(payload)
                     continue
                 if self._talkover:
                     await self._flush_talkover()
