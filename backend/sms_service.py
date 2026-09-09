@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -186,7 +187,44 @@ def phone_line_type(e164: str) -> Optional[str]:
         sms_debug("line_type_lookup_failed", to_masked=mask_phone_e164(num), error=str(e)[:120])
         result = None
     _line_type_cache[num] = result
+    # At INFO, not sms_debug. The debug line below it has never been visible in
+    # production, so when a Verizon salon line was promised a text on 2026-09-09 there
+    # was no way to tell what Twilio had called it — or whether it had been asked at all.
+    # One line per distinct caller; the cache means it does not repeat.
+    sms_info(
+        "caller_line_type",
+        to_masked=mask_phone_e164(num),
+        line_type=result or "unknown",
+        textable=result not in _NON_TEXTABLE_LINE_TYPES,
+    )
     return result
+
+
+def prefetch_line_type(e164: str) -> None:
+    """Start resolving a caller's line type, off the call path. Never blocks, never raises.
+
+    Twilio Lookup is a network round trip, and the voice turn is already one un-streamed
+    LLM call — doing it inline would be felt on the phone. Warming the cache instead means
+    the answer is there from the second turn onward, which is where a caller asks how
+    they'll be contacted.
+    """
+    num = (e164 or "").strip()
+    if not num or not line_type_lookup_enabled() or num in _line_type_cache:
+        return
+    threading.Thread(target=lambda: phone_line_type(num), daemon=True).start()
+
+
+def known_non_textable(e164: str) -> bool:
+    """True only when we have LOOKED UP this number and it cannot receive texts.
+
+    Deliberately false while the lookup is still in flight or has failed: unknown means
+    "say nothing special", the same way it means "go ahead and send" in send_sms. The
+    caller hearing one turn without a line-type caveat is the cost of never blocking.
+    """
+    num = (e164 or "").strip()
+    if not num or num not in _line_type_cache:
+        return False
+    return _line_type_cache[num] in _NON_TEXTABLE_LINE_TYPES
 
 
 def _twilio_error_code(err: Exception) -> Optional[int]:
