@@ -42,6 +42,7 @@ from voice.streaming_tts import stream_tts_ulaw_frames
 from voice.twilio_call import safe_twilio_call_update
 from voice.barge_detector import BargeDetector, barge_in_enabled
 from voice.twilio_media import parse_twilio_media_message, twilio_media_payload_bytes, twilio_start_meta
+from voice.turn_chime import TURN_CHIME_FRAMES, chime_enabled
 from voice.utterance import apply_caller_utterance
 
 _log = logging.getLogger("nuvatra")
@@ -396,8 +397,24 @@ class _BidiSession:
             await asyncio.sleep(0.05)
         return ""
 
+    async def _play_turn_chime(self) -> None:
+        """Tell the caller their turn has been taken. Never blocks the turn, never raises.
+
+        Sent before apply_caller_utterance rather than after, so it lands at the moment we
+        stopped listening rather than whenever the brain happens to finish. 140ms of audio,
+        so it is over well before the reply is ready.
+        """
+        if not chime_enabled() or self._closing or not self.stream_sid:
+            return
+        try:
+            for frame in TURN_CHIME_FRAMES:
+                await self._send_media(frame)
+        except Exception:
+            voice_warning("bidi_turn_chime_failed", call_sid=self.call_sid)
+
     async def _run_turn(self, text: str, conf: float) -> None:
         voice_transcript("caller_said", call_sid=self.call_sid, text=text)
+        await self._play_turn_chime()
         result = await apply_caller_utterance(self.call_sid or "", text, conf, self.base_url)
         # Forward / limits / lost-session / language-record all come back as a full TwiML doc:
         # REST-replace the call with it (that supersedes the <Connect> stream and ends the WS).
