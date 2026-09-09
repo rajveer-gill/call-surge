@@ -85,6 +85,22 @@ _ECHO_OVERLAP = 0.6
 _DG_KEEPALIVE_SEC = 5.0
 
 
+def _is_contiguous_run(needle: list[str], haystack: list[str]) -> bool:
+    """True when `needle` appears in `haystack` as an unbroken run of words.
+
+    The test for "did we just hear ourselves". Echo is a recording of our own audio, so
+    its transcript is our words in our order with nothing inserted. A caller answering is
+    reassembling the words themselves and rarely lands on an exact run.
+    """
+    if not needle or len(needle) > len(haystack):
+        return False
+    first = needle[0]
+    for i in range(len(haystack) - len(needle) + 1):
+        if haystack[i] == first and haystack[i : i + len(needle)] == needle:
+            return True
+    return False
+
+
 class _BidiSession:
     def __init__(self, websocket: WebSocket, twilio_client: Any) -> None:
         self.ws = websocket
@@ -298,10 +314,27 @@ class _BidiSession:
         words = re.findall(r"[a-z0-9']+", (text or "").lower())
         if len(words) < _ECHO_MIN_WORDS:
             return False
-        mine = set(re.findall(r"[a-z0-9']+", said))
+        mine = re.findall(r"[a-z0-9']+", said)
         if not mine:
             return False
-        return sum(1 for w in words if w in mine) / len(words) >= _ECHO_OVERLAP
+        if sum(1 for w in words if w in set(mine)) / len(words) < _ECHO_OVERLAP:
+            return False
+        # Overlap alone is not enough, and on 2026-09-09 it cost a caller her answer:
+        #
+        #   ai   'We offer "Shampoo & Haircut" or "Shampoo, Haircut & Blow Dry."
+        #         Which one would you prefer?'
+        #   her  "Shampoo, haircut, and blow dry."      <- DISCARDED as our own echo
+        #        ...26 seconds of silence, then "Are you there?"
+        #
+        # Answering a menu means saying the menu back, so a caller picking an option
+        # scores ~100% overlap by construction. The heuristic is inverted exactly where
+        # it is most likely to fire.
+        #
+        # What separates them is that echo is an acoustic copy: it returns as an exact
+        # run of our own words, in our order. An answer is reassembled — she said "and"
+        # where we said "&", which no echo would do. "this call may be", a real echo of
+        # the greeting, is a contiguous run and is still caught.
+        return _is_contiguous_run(words, mine)
 
     # ---- utterance accumulation + debounced commit ----
     def _on_transcript(self, text: str, is_final: bool, conf: float) -> None:
