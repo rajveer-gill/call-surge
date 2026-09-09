@@ -17,6 +17,7 @@ from voice.turn_chime import (
     _FRAME_SAMPLES,
     _SAMPLE_RATE,
     _TONE_HZ,
+    _TONE_SEC,
     chime_enabled,
 )
 
@@ -65,7 +66,7 @@ def test_it_is_quiet():
 def test_the_pitch_is_right():
     """Counting zero crossings catches an encoder that produces plausible-looking noise.
 
-    A 880 Hz tone crosses zero twice per cycle, so over the tone's length the count is
+    The tone crosses zero twice per cycle, so over its length the count is
     close to 2 * f * seconds. Silence padding contributes none.
     """
     pcm = _pcm()
@@ -75,8 +76,11 @@ def test_the_pitch_is_right():
     tone_seconds = crossings / (2 * _TONE_HZ) if crossings else 0
     expected = 2 * _TONE_HZ * tone_seconds
     assert abs(crossings - expected) < 5
-    # Sanity: that implies a tone of roughly the length we built, not a click.
-    assert 0.10 <= tone_seconds <= 0.20, tone_seconds
+    # And that the crossings span roughly the tone we built, not a click. Tied to the
+    # configured length rather than a literal, so retuning the chime does not need this
+    # edited — the overtones are quiet enough that the waveform still crosses zero at the
+    # fundamental, which is what makes this a fundamental-frequency check at all.
+    assert abs(tone_seconds - _TONE_SEC) < 0.03, (tone_seconds, _TONE_SEC)
 
 
 def test_it_starts_and_ends_softly():
