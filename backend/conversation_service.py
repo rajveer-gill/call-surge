@@ -768,6 +768,105 @@ def stylist_day_availability_note(
     )
 
 
+# How many free times to read out. A spoken list longer than this is not an offer, it is
+# a recital nobody can hold in their head.
+_MAX_OFFERED_TIMES = 4
+
+
+def staff_free_times(srow: dict, date_str: str, info: Optional[dict] = None) -> list[str]:
+    """The times this stylist is genuinely free on this date, HH:MM, from the calendar.
+
+    Empty when they are off that day, when the shop is closed, or when the calendar
+    cannot be read — every one of which must mean "offer nothing" rather than "offer
+    anything", because the entire point is to stop times being invented.
+    """
+    biz = info or config_service.get_business_info()
+    import staff_schedule
+
+    if staff_schedule.staff_unavailable_message(srow, date_str, ""):
+        return []
+    try:
+        day = date.fromisoformat((date_str or "").strip())
+    except (ValueError, TypeError):
+        return []
+    sid = (srow.get("id") or "").strip() or None
+    free: list[str] = []
+    try:
+        for hhmm in booking_service._hourly_slots_for_date(biz, day):
+            if booking_service.is_slot_available(date_str, hhmm, staff_id=sid):
+                free.append(hhmm)
+    except Exception as e:
+        logger.warning("staff_free_times failed for %s: %s", date_str, e, exc_info=True)
+        return []
+    return free
+
+
+def stylist_free_times_note(
+    conversation_history: Optional[list], info: Optional[dict] = None
+) -> Optional[str]:
+    """Which times the named stylist is actually free — decided here, not by the model.
+
+    Lana Anderberg, testing on go-live morning 2026-09-09:
+
+        16:51:02  ai    "Terrance is working today, but the 10:45 AM time isn't
+                         available. How about 12:00 PM or 1:00 PM instead?"
+        16:51:55  Lana  "12:00 works."
+        16:51:58  ai    "Terrance already has an appointment at 12:00 PM..."
+        16:52:36  Lana  "Then why did you tell me 12:00 was available?"
+        16:54:05  Lana  "Why did you offer me a 12:00?"
+        16:54:14  call_end  appointment_created=False  duration_sec=229
+
+    Nothing had ever told the model which times were free. The roster fact above says
+    only whether the stylist works that DAY, and the slot check in
+    _validate_booking_requirements runs at BOOKING time on a finished reply. Between
+    those two, asked for an alternative, the model made one up — and the slot check then
+    refused the very time it had just offered. The guard was right every time and still
+    produced three and a half minutes of a regional director asking a question that had
+    no honest answer.
+
+    So the free list is computed and handed over as a fact, the same way the working-day
+    verdict is, leaving nothing to work out. Silence when we cannot compute it: an
+    invented time is what we are fixing, and a guess is an invented time.
+    """
+    biz = info or config_service.get_business_info()
+    if not _conversation_suggests_booking(conversation_history):
+        return None
+    user_text = _conversation_user_text(conversation_history)
+    if not user_text.strip():
+        return None
+    sid = _staff_id_from_spoken_text(user_text, biz)
+    if not sid:
+        return None
+    srow = next(
+        (s for s in (biz.get("staff") or []) if (s.get("id") or "").strip() == sid), None
+    )
+    if not srow:
+        return None
+    date_str = _requested_date_from_spoken_text(user_text, biz)
+    if not date_str:
+        return None
+    name = (srow.get("name") or "").strip() or "That stylist"
+    free = staff_free_times(srow, date_str, biz)
+    weekday = date.fromisoformat(date_str).strftime("%A")
+    if not free:
+        return (
+            "FREE TIMES FACT — computed from the calendar, authoritative, do NOT contradict "
+            f"it or reason about it yourself: {name} has NO free times on {weekday} "
+            f"{date_str}. Do NOT offer or suggest any time on that day. Offer another day or "
+            "another stylist instead."
+        )
+    shown = ", ".join(booking_service._hhmm_to_ampm(t) for t in free[:_MAX_OFFERED_TIMES])
+    more = "" if len(free) <= _MAX_OFFERED_TIMES else " (and later times after those)"
+    return (
+        "FREE TIMES FACT — computed from the calendar, authoritative, do NOT contradict it "
+        f"or reason about it yourself: on {weekday} {date_str}, {name} is free at "
+        f"{shown}{more}. If you offer, suggest or confirm a time for {name} that day it MUST "
+        "be one of these. NEVER invent a time or offer one not on this list — a time you "
+        "offer will be refused when the booking is filed, and the caller will have been "
+        "told they could have it."
+    )
+
+
 # Structural patterns for "the model is claiming a booking exists". Regex (not literal
 # substrings) so paraphrases and tense changes can't slip through — a literal blocklist is
 # exactly how "Perfect, I've got everything I need." reached a live customer demo while
@@ -1769,13 +1868,25 @@ def _validate_booking_requirements(
                     staff_id=staff_id,
                     external=config_service.is_external_booking(biz),
                 )
+                # Name real alternatives rather than asking an open question. "Would you
+                # like another time?" sends the caller back to the model to guess again,
+                # which is how Lana was offered — and refused — 12 PM twice in one call.
+                free = staff_free_times(srow or {}, booking_date, biz) if srow else []
+                free = [t for t in free if t != slot_time][:_MAX_OFFERED_TIMES]
+                if free:
+                    alternatives = (
+                        f"{who} is free at "
+                        + ", ".join(booking_service._hhmm_to_ampm(t) for t in free)
+                        + ". Would any of those work?"
+                    )
+                else:
+                    alternatives = "Would you like another day, or a different stylist?"
                 return (
                     False,
                     (
                         f"{who} already has an appointment at "
                         f"{booking_service._hhmm_to_ampm(slot_time)} on "
-                        f"{staff_schedule.friendly_date(booking_date)}. "
-                        "Would you like another time, or a different stylist?"
+                        f"{staff_schedule.friendly_date(booking_date)}. " + alternatives
                     ),
                     staff_id,
                     canonical_reason,
@@ -2728,6 +2839,17 @@ async def generate_response_async(
                 call_sid=call_sid,
                 client_id=str(call_data.get("client_id") or ""),
                 available="does NOT work" not in availability,
+            )
+        # Which times are actually free, so an offered time is never one the slot check
+        # will refuse a moment later. See stylist_free_times_note.
+        free_note = stylist_free_times_note(call_data["conversation_history"])
+        if free_note:
+            messages.append({"role": "system", "content": free_note})
+            voice_info(
+                "stylist_free_times_injected",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                any_free="NO free times" not in free_note,
             )
         nudge = _voice_booking_nudge_message(
             call_data["conversation_history"],

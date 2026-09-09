@@ -79,7 +79,12 @@ def test_a_slot_we_know_is_taken_is_refused(monkeypatch):
     # The caller is told who, when, and what to do next — not just "no".
     assert "Melissa" in msg
     assert "5:00 PM" in msg
-    assert "another time" in msg
+    # "Would you like another time?" used to be the whole of "what to do next", and it
+    # sent the caller back to the model to guess — which is how Lana was offered, and
+    # then refused, 12 PM twice in one call on 2026-09-09. The next step is now real
+    # times read off the calendar. See test_offered_times_are_real.py.
+    assert "is free at" in msg
+    assert "5:00 PM" not in msg.split("is free at", 1)[1], "offered the slot it just refused"
 
 
 def test_the_same_slot_with_a_free_stylist_is_allowed(monkeypatch):
