@@ -69,10 +69,45 @@ def get_stats(tenant: Optional[dict] = Depends(deps.require_active_subscription)
     }
 
 
+def _mark_utc(value) -> str:
+    """Stamp a stored timestamp as UTC, because it is one and does not say so.
+
+    Call starts are written with `datetime.now().isoformat()` (voice_service), which on
+    Render — where the clock is UTC — produces "2026-09-09T17:18:06.123456" with no
+    offset. The browser then does `new Date(...)` on that, and a bare ISO string with a
+    time and no zone is parsed as LOCAL. So Gig Harbor read a 10:18 AM call as 5:18 PM,
+    every row seven hours out, and a call anyone went looking for by time was not where
+    they looked.
+
+    The aggregation below has always assumed naive means UTC (`dt.replace(tzinfo=utc)`),
+    so the hour and weekday charts were right the whole time — only the raw string handed
+    to the browser was ambiguous. Saying so here fixes rows already in the database as
+    well as new ones, which a change to the writer alone would not.
+    """
+    s = (value or "").strip()
+    if not s:
+        return s
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return s
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _with_utc_timestamps(entries: List[dict]) -> List[dict]:
+    for e in entries:
+        for key in ("start_iso", "end_iso"):
+            if e.get(key):
+                e[key] = _mark_utc(e[key])
+    return entries
+
+
 def _load_call_log(days: Optional[int] = None) -> List[dict]:
     """Load call log. If days set, filter by plan (DB only). Returns list of call entries (newest first)."""
     if runtime.USE_DB:
-        return database.db_call_log_load(limit=5000, days=days)
+        return _with_utc_timestamps(database.db_call_log_load(limit=5000, days=days))
     data_dir = config_service.get_client_data_dir()
     if not data_dir:
         return []
@@ -81,7 +116,7 @@ def _load_call_log(days: Optional[int] = None) -> List[dict]:
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return _with_utc_timestamps(json.load(f))
     except Exception:
         return []
 
