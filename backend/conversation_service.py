@@ -1595,8 +1595,22 @@ def _apply_booking_customer_name(
     mem_name = ((caller_memory or {}).get("name") or "").strip()
     mem_ok = _caller_memory_name_usable(mem_name, staff_names)
 
-    if name and staff_names and name.lower() in staff_names:
-        booking["name"] = mem_name if mem_ok else ""
+    # A customer really can be called Melissa. Lana Anderberg, 2026-09-09: "It can't
+    # distinguish a customer with the same name as our stylists, it gets confused and
+    # books with the stylist with that name and won't take their name."
+    #
+    # This used to erase field 1 whenever it matched anyone on the roster, so a caller
+    # sharing a stylist's first name had their name wiped — and a booking cannot be filed
+    # without one, so that whole class of customer could never book at all. The clear
+    # mistake it was written for is the model copying the stylist into the caller slot,
+    # which the next branch catches by comparing field 1 with field 7.
+    #
+    # Left here is the ambiguous case: a roster name in field 1 with no stylist named.
+    # Only override it when caller-memory says the caller is somebody else — otherwise
+    # take them at their word. Filing a request under a confusing name is recoverable;
+    # refusing to take the booking is not.
+    if name and staff_names and name.lower() in staff_names and mem_ok:
+        booking["name"] = mem_name
         return
 
     if (
