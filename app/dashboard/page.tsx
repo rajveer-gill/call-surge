@@ -59,6 +59,10 @@ export type SubscriptionState = {
 export default function DashboardPage() {
   const router = useRouter()
   const api = useApiClient()
+  // Lana Anderberg, 2026-09-09: "It would be great if on the messages tab if there was a
+  // notification dot. To remind people to look at the message tab." A landline caller who
+  // cannot be texted, and anyone leaving a message, lands there and nowhere else.
+  const [unreadMessages, setUnreadMessages] = useState(0)
   const reduceMotion = useReducedMotion()
   const [activeTab, setActiveTab] = useState<'dashboard' | 'appointments' | 'leads' | 'messages' | 'settings'>('appointments')
   const [access, setAccess] = useState<'loading' | 'granted' | 'denied' | 'subscription_required'>('loading')
@@ -96,10 +100,36 @@ export default function DashboardPage() {
       { id: 'appointments', label: 'Appointments' },
       { id: 'dashboard', label: 'Dashboard' },
       { id: 'leads', label: 'Leads' },
-      { id: 'messages', label: 'Messages' },
+      { id: 'messages', label: 'Messages', dot: unreadMessages > 0 },
       { id: 'settings', label: 'Settings' },
-    ] as { id: typeof activeTab; label: string }[]
-  }, [])
+    ] as { id: typeof activeTab; label: string; dot?: boolean }[]
+  }, [unreadMessages])
+
+  // Unread messages, for the dot on the Messages tab. Same 30s cadence as the other
+  // panels, and re-checked whenever a tab is opened so reading them clears it promptly
+  // rather than up to half a minute later.
+  useEffect(() => {
+    if (access !== 'granted') return
+    let cancelled = false
+    const load = () => {
+      api
+        .get('/api/messages')
+        .then((r) => {
+          if (cancelled) return
+          const rows = (r.data?.messages || []) as { status?: string }[]
+          setUnreadMessages(rows.filter((m) => (m?.status || '') !== 'read').length)
+        })
+        .catch(() => {
+          /* a dot is not worth surfacing an error for */
+        })
+    }
+    load()
+    const t = setInterval(load, 30000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [api, access, activeTab])
 
   const applySubscriptionError = useCallback((err: { response?: { status?: number; data?: { detail?: string } } }) => {
     const status = err.response?.status
@@ -686,7 +716,20 @@ export default function DashboardPage() {
                       aria-hidden
                     />
                   ))}
-                <span className="relative z-10">{tab.label}</span>
+                <span className="relative z-10">
+                  {tab.label}
+                  {tab.dot && (
+                    <>
+                      <span
+                        className="ml-1.5 inline-block h-2 w-2 rounded-full bg-cyan-400 align-middle shadow-[0_0_6px_rgba(34,211,238,0.9)]"
+                        aria-hidden
+                      />
+                      {/* Colour alone would not carry to a screen reader, or to anyone
+                          who cannot pick the dot out against the pill. */}
+                      <span className="sr-only"> ({unreadMessages} unread)</span>
+                    </>
+                  )}
+                </span>
               </button>
             ))}
           </div>
