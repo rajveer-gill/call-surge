@@ -371,21 +371,45 @@ def _user_text_from_history(conversation_history: Optional[list]) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _service_match_text(s: str) -> str:
+    """Lowercase, spell out "&", drop punctuation, collapse spaces.
+
+    A menu writes "Shampoo & Haircut" and a caller says "a shampoo and haircut". The
+    substring match below never bridged the ampersand, so the caller had to say the
+    service exactly as it is spelled on the menu for it to register at all. Lana
+    Anderberg, 2026-09-09: "Even if a person asks for a specific service at the beginning
+    of a call she introduces herself and asks what service do you want." — the nudge chain
+    believed the service was still unchosen and kept steering back to asking for it.
+
+    The booking-time normaliser (booking_service.normalize_service_choices_for_booking)
+    has always been lenient here; only this gate was strict, so the two disagreed about
+    whether the caller had chosen.
+    """
+    t = (s or "").lower().replace("&", " and ")
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def user_indicated_service_name(user_text: str, service_names: frozenset[str]) -> bool:
-    t = (user_text or "").lower()
-    if not t.strip():
+    t = _service_match_text(user_text)
+    if not t:
         return False
     # Whitespace-insensitive comparison too: speech-to-text often runs multi-word service
     # names together ("short cut" -> "shortcut"), which shouldn't fail the match.
-    t_nospace = re.sub(r"\s+", "", t)
+    t_nospace = t.replace(" ", "")
+    # And with connectors dropped, so "the shampoo haircut" still finds "Shampoo & Haircut".
+    t_bare = t_nospace.replace("and", "")
     for nm in service_names:
-        nm = (nm or "").strip()
+        nm = _service_match_text(nm)
         if not nm:
             continue
         if re.search(rf"\b{re.escape(nm)}\b", t) or nm in t:
             return True
-        nm_nospace = re.sub(r"\s+", "", nm)
+        nm_nospace = nm.replace(" ", "")
         if nm_nospace and nm_nospace in t_nospace:
+            return True
+        nm_bare = nm_nospace.replace("and", "")
+        if len(nm_bare) >= 6 and nm_bare in t_bare:
             return True
     return False
 
