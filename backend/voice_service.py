@@ -1261,6 +1261,11 @@ def should_forward_to_human(
         "agent",
         "representative",
         "transfer me",
+        # "I'd like to be transferred to the salon" matched nothing here on 2026-09-09 —
+        # the list only knew the imperative. She was answered by the model instead, which
+        # said it could not transfer, and the call only went through when she rephrased.
+        "transferred",
+        "transfer to",
         "connect me",
         "forward me",
         "can i speak to",

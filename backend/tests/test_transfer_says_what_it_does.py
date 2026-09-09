@@ -92,3 +92,55 @@ def test_take_a_message_suppresses_a_named_transfer(monkeypatch):
 def test_take_a_message_off_leaves_named_transfer_alone(monkeypatch):
     monkeypatch.setattr(cs.config_service, "transfer_takes_message", lambda *a, **k: False)
     assert cs.config_service.transfer_takes_message() is False
+
+
+class TestAskingToBeTransferred:
+    """The wording that missed. Lana, 2026-09-09, said in one breath:
+
+        "I'd like to be transferred to the salon and speak to a real person."
+
+    Deepgram split it at the full stop, so the first half arrived alone — and the
+    human-request keyword list knew "transfer me" but not "transferred", so it matched
+    nothing. The model answered instead, honestly, that it could not transfer. Fourteen
+    seconds later the second half landed, "real person" matched, and the call went
+    through: told no, then transferred.
+
+        18:52:09  her  "I'd like to be transferred to the salon."
+        18:52:11  ai   "While I can't transfer your call directly..."
+        18:52:23  her  "And speak to a real person."
+        18:52:23  forward_decision | matched_keyword="real person"
+    """
+
+    def _asks_for_human(self, said: str) -> bool:
+        import voice_service
+
+        return voice_service.should_forward_to_human(said, "")
+
+    def test_the_phrasing_that_missed(self):
+        assert self._asks_for_human("I'd like to be transferred to the salon.") is True
+
+    def test_other_passive_phrasings(self):
+        for said in (
+            "can I get transferred to the salon",
+            "please transfer to the store",
+            "I want to be transferred",
+        ):
+            assert self._asks_for_human(said) is True, said
+
+    def test_the_wordings_that_already_worked_still_do(self):
+        for said in (
+            "let me speak to a real person",
+            "transfer me please",
+            "can I speak to someone",
+            "I need to talk to a manager",
+        ):
+            assert self._asks_for_human(said) is True, said
+
+    def test_ordinary_booking_talk_does_not_transfer(self):
+        for said in (
+            "I'd like to book a shampoo and haircut",
+            "Wednesday at three o'clock",
+            "anyone is fine",
+            "Terrance please",
+        ):
+            assert self._asks_for_human(said) is False, said
