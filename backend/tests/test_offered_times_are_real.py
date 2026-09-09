@@ -159,3 +159,39 @@ def test_the_refusal_falls_back_when_there_is_nothing_to_offer(monkeypatch):
     assert ok is False
     assert "another day, or a different stylist" in msg
     assert "is free at" not in msg
+
+
+def test_a_time_that_has_already_passed_is_not_free(monkeypatch):
+    """Lana, 2026-09-09: "Offered past times as available ie 9 am at 11:04 am."
+
+    The shop's opening hours describe the whole day. A slot earlier than now has not
+    got free, it has gone — and offering it sends the caller to a time they cannot take.
+    Introduced by the free-times fix itself, which read the hours and forgot the clock.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    today = "2099-07-08"
+    at_1104 = datetime(2099, 7, 8, 11, 4, tzinfo=ZoneInfo("America/Los_Angeles"))
+    monkeypatch.setattr(cs, "business_local_now", lambda _biz=None: at_1104)
+    monkeypatch.setattr(cs.config_service, "get_business_info", lambda: BIZ)
+    monkeypatch.setattr(cs.booking_service, "is_slot_available", _slots(set()))
+
+    free = cs.staff_free_times(TERRANCE, today, BIZ)
+    assert "09:00" not in free, "offered a time three hours in the past"
+    assert "11:00" not in free, "offered a time four minutes in the past"
+    assert "14:00" in free, "the rest of the day is still bookable"
+
+
+def test_a_future_day_is_bookable_from_opening(monkeypatch):
+    """The cutoff is only about today; tomorrow's 9 AM is perfectly real."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    at_1104 = datetime(2099, 7, 8, 11, 4, tzinfo=ZoneInfo("America/Los_Angeles"))
+    monkeypatch.setattr(cs, "business_local_now", lambda _biz=None: at_1104)
+    monkeypatch.setattr(cs.config_service, "get_business_info", lambda: BIZ)
+    monkeypatch.setattr(cs.booking_service, "is_slot_available", _slots(set()))
+
+    free = cs.staff_free_times(TERRANCE, "2099-07-09", BIZ)
+    assert "09:00" in free

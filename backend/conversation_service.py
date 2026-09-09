@@ -772,6 +772,11 @@ def stylist_day_availability_note(
 # a recital nobody can hold in their head.
 _MAX_OFFERED_TIMES = 4
 
+# How far ahead of "now" the earliest offerable slot sits, on the current day. A caller
+# ringing at 11:04 cannot take the 11:00, and offering the 11:30 they would have to
+# arrive at instantly is barely better.
+_SOONEST_BOOKABLE_MINUTES = 30
+
 
 def staff_free_times(srow: dict, date_str: str, info: Optional[dict] = None) -> list[str]:
     """The times this stylist is genuinely free on this date, HH:MM, from the calendar.
@@ -792,7 +797,17 @@ def staff_free_times(srow: dict, date_str: str, info: Optional[dict] = None) -> 
     sid = (srow.get("id") or "").strip() or None
     free: list[str] = []
     try:
+        # Lana Anderberg, 2026-09-09: "Offered past times as available ie 9 am at
+        # 11:04 am." The shop's opening hours are the whole day; a time that has already
+        # gone is not free, it is over. Only ever an issue for today, and the cutoff sits
+        # a little ahead of now because nobody can be in the chair this minute.
+        cutoff = ""
+        now_local = business_local_now(biz)
+        if day == now_local.date():
+            cutoff = (now_local + timedelta(minutes=_SOONEST_BOOKABLE_MINUTES)).strftime("%H:%M")
         for hhmm in booking_service._hourly_slots_for_date(biz, day):
+            if cutoff and hhmm <= cutoff:
+                continue
             if booking_service.is_slot_available(date_str, hhmm, staff_id=sid):
                 free.append(hhmm)
     except Exception as e:
@@ -912,14 +927,29 @@ _COMMITTED_BOOKING_RE = re.compile(
 # every reply and must never fire, nor must "I'll put in the request for today at 4 PM" —
 # both are promises about what happens next, which is exactly what should be said before
 # the BOOKING line exists.
+# Every way of saying "it's done" that we have actually heard, plus the near neighbours.
+# A caller on 2026-09-09 was told this four times across four minutes and nothing was
+# recorded, because "noted" was not on the list:
+#
+#     18:36:34  ai   "I've noted your request ... today at 3:00 PM."
+#     18:37:43  call_end  appointment_created=False
+#
+# They gave a service, a time and a second phone number to be reached on, and hung up
+# believing the salon had it. The list is deliberately generous: a false positive costs
+# one turn of the receptionist double-checking, and a miss costs a customer who thinks
+# they have an appointment.
+_FALSE_CLAIM_VERBS = (
+    r"put\s+in|put\s+down|sent|submitted|filed|placed|entered|logged|noted|recorded|"
+    r"saved|added|got|taken\s+down|written\s+down|marked\s+down|passed\s+(?:on|along)"
+)
 _FALSE_REQUEST_CLAIM_RE = re.compile(
     "|".join(
         (
-            r"\b(?:i|we)\s*(?:'ve|\s+have)\s+(?:already\s+)?"
-            r"(?:put\s+in|sent|submitted|filed|placed|entered|logged)\s+"
+            rf"\b(?:i|we)\s*(?:'ve|\s+have)\s+(?:already\s+)?"
+            rf"(?:{_FALSE_CLAIM_VERBS})\s+"
             r"(?:your|the|a|this)\s+request\b",
-            r"\byour\s+request\s+(?:is\s+(?:in|placed|submitted|logged)\b"
-            r"|has\s+been\s+(?:put\s+in|sent|submitted|filed|placed|logged)\b)",
+            rf"\byour\s+request\s+(?:is\s+(?:in|placed|submitted|logged|noted|recorded)\b"
+            rf"|has\s+been\s+(?:{_FALSE_CLAIM_VERBS})\b)",
         )
     ),
     re.IGNORECASE,
