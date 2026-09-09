@@ -3278,6 +3278,18 @@ async def generate_response_async(
 
         # Pro: Staff transfer - AI may respond with TRANSFER_TO: Name
         transfer_name = voice_service.parse_transfer_to(ai_text)
+        if transfer_name and config_service.transfer_takes_message():
+            # A shop that chose "take a message instead of transferring" meant it on every
+            # path. should_forward_to_human already honours this; the named-staff path did
+            # not, so a TRANSFER_TO line still put the call through.
+            voice_forward(
+                "staff_transfer_suppressed_takes_message",
+                call_sid=call_sid,
+                client_id=str(call_data.get("client_id") or ""),
+                forward_kind="take_message",
+                staff_name=transfer_name[:80],
+            )
+            transfer_name = None
         if transfer_name:
             staff_phone = config_service.get_staff_phone_by_name(transfer_name)
             if staff_phone:

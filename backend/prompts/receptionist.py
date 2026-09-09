@@ -397,9 +397,26 @@ def build_system_prompt(
                 "TRANSFER_TO: [Name] (use the exact name from the list). Otherwise do not use TRANSFER_TO."
             )
         elif all_names:
+            # The shop's own line is dialled by voice/utterance.py on a keyword match in
+            # the caller's raw words, before the model is consulted at all — so the model
+            # has no idea it is reachable. Lana Anderberg, 2026-09-09: "If you ask to be
+            # transferred to the salon, it tells you it cannot do that and then it
+            # transfers the call." She asked, the model honestly said it could not, she
+            # rephrased, "real person" hit the keyword list and the call was put through.
+            # Telling it the truth is the fix; the dial itself was correct.
+            store_line_reachable = bool(
+                (business_info.get("forwarding_phone") or "").strip()
+            ) and not business_info.get("transfer_takes_message")
             staff_block = (
-                f"\n- Staff on file (no live transfer configured): {', '.join(all_names)}. "
-                "Do not use TRANSFER_TO. Offer to take a message or use the business forwarding number if appropriate."
+                f"\n- Staff on file (no per-person transfer configured): {', '.join(all_names)}. "
+                "Do not use TRANSFER_TO. "
+                + (
+                    "The salon's own line IS reachable: if the caller asks for a person, "
+                    "for the salon, or to be transferred, say you'll put them through — "
+                    "never tell them you cannot transfer."
+                    if store_line_reachable
+                    else "Offer to take a message."
+                )
             )
         # Optional context from business (not email/phone — reduces PII exposure in the model).
         notes_cap = 400
