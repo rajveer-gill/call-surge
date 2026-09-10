@@ -203,6 +203,43 @@ def _suggests_booking(text: str) -> bool:
     )
 
 
+def _caller_was_giving_their_own_name(
+    conversation_history: Optional[list], biz: dict
+) -> bool:
+    """True when the caller's last turn is their OWN name, not a stylist request.
+
+    A real customer on 2026-09-10, answering "What's your name?":
+
+        15:56:55  her  "Melissa."
+        15:56:56  ai   "Melissa isn't available today, but she works Tuesday,
+                        Wednesday, and Saturday..."
+        15:57:07  her  "Melissa."
+        15:57:10  her  "No. My name is Melissa."
+        15:57:12  ai   "Thanks, Melissa. For the Shampoo & Haircut, Melissa isn't
+                        available today..."
+
+    The stylist extractors scan the caller's words for any roster name with no idea what
+    question was just asked, so her answer became a stylist request — and the availability
+    fact then stated it as authoritative, three times, past her correction. The booking
+    came out right in the end; the two and a half minutes to get there did not.
+
+    Deliberately narrow: only when we JUST asked for the name, and only when the reply is
+    little more than the name itself. "Melissa, and can I have Terrance at 3" is someone
+    doing both at once and must keep working.
+    """
+    if not assistant_asked_name_recently(conversation_history, assistant_window=1):
+        return False
+    last = (latest_user_message(conversation_history) or "").strip()
+    if not last:
+        return False
+    if not _staff_id_from_spoken_text(last, biz):
+        return False
+    # A name and little else. Five words covers "No. My name is Melissa." and
+    # "It's Melissa" while excluding a turn that also names a day, time or service.
+    words = re.findall(r"[A-Za-z']+", last)
+    return len(words) <= 5
+
+
 def _conversation_user_text(conversation_history: Optional[list]) -> str:
     if not conversation_history:
         return ""
@@ -756,6 +793,9 @@ def stylist_day_availability_note(
     user_text = _conversation_user_text(conversation_history)
     if not user_text.strip():
         return None
+    if _caller_was_giving_their_own_name(conversation_history, biz):
+        # She was telling us who she is, not asking for a stylist.
+        return None
     sid = _staff_id_from_spoken_text(user_text, biz)
     if not sid:
         return None
@@ -869,6 +909,9 @@ def stylist_free_times_note(
         return None
     user_text = _conversation_user_text(conversation_history)
     if not user_text.strip():
+        return None
+    if _caller_was_giving_their_own_name(conversation_history, biz):
+        # She was telling us who she is, not asking for a stylist.
         return None
     sid = _staff_id_from_spoken_text(user_text, biz)
     if not sid:
